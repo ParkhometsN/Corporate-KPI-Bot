@@ -56,11 +56,12 @@ class GradeService:
                         f"Следующий   {next_rule.category_title}",
                         f"Выручка/дн. {money(next_rule.average_daily_revenue_required)}",
                         f"Период      {next_rule.months_required} мес.",
+                        f"Расчёт      {_grade_period_label(next_rule.months_required)}",
                         f"Стаж        {next_rule.minimum_employment_months} мес.",
                         f"Прогресс    {telegram_progress_bar(progress)} {progress:.0f}%",
                     ]
                 ),
-                blockquote("Прогресс считается по средней дневной выручке и минимальному стажу для следующей категории."),
+                blockquote("Прогресс считается по средней дневной выручке за закрытые месяцы и минимальному стажу."),
             ]
         )
 
@@ -114,6 +115,29 @@ def _find_current_and_next(
             next_rule = rules[index + 1] if index + 1 < len(rules) else None
             return rule, next_rule
     return None, rules[0] if rules else None
+
+
+def _grade_period_label(months_required: int) -> str:
+    checked_months = _previous_full_months(months_required)
+    if not checked_months:
+        return "-"
+    first = checked_months[-1]
+    last = checked_months[0]
+    return f"{first:%m.%Y}" if first == last else f"{first:%m.%Y}-{last:%m.%Y}"
+
+
+def _previous_full_months(count: int) -> list[date]:
+    month = date.today().replace(day=1)
+    months: list[date] = []
+    year = month.year
+    month_number = month.month
+    for _ in range(max(0, count)):
+        month_number -= 1
+        if month_number == 0:
+            month_number = 12
+            year -= 1
+        months.append(date(year, month_number, 1))
+    return months
 
 
 def progress_bar(progress: Decimal, width: int = 10) -> str:

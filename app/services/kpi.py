@@ -87,6 +87,7 @@ class KpiService:
         )
         summary = [
             f"Период      {entity.month:%m.%Y}",
+            *_month_period_lines(entity.month),
             f"Сотрудник   {employee.full_name}",
             f"Грейд       {employee.category_title or 'не указан'}",
             f"База KPI    {money(entity.kpi_base_amount)}",
@@ -127,20 +128,19 @@ class KpiService:
         refresh_errors = 0
         first_refresh_warning: str | None = None
         total_base = Decimal("0")
+        if refresh:
+            try:
+                await self._statistics.refresh_team_period(employees, "month")
+            except AppError as exc:
+                refresh_errors = len(employees)
+                first_refresh_warning = yclients_data_error_hint(exc.public_message)
+            except Exception as exc:
+                logger.exception("team_kpi_refresh_failed", title=title, month=month.isoformat())
+                refresh_errors = len(employees)
+                first_refresh_warning = yclients_data_error_hint(
+                    f"Не удалось обновить данные из YCLIENTS: {str(exc)[:200]}"
+                )
         for employee in employees:
-            if refresh:
-                try:
-                    await self._statistics.refresh_period(employee, "month")
-                except AppError as exc:
-                    refresh_errors += 1
-                    if first_refresh_warning is None:
-                        first_refresh_warning = yclients_data_error_hint(exc.public_message)
-                except Exception as exc:
-                    refresh_errors += 1
-                    if first_refresh_warning is None:
-                        first_refresh_warning = yclients_data_error_hint(
-                            f"Не удалось обновить данные из YCLIENTS: {str(exc)[:200]}"
-                        )
             entity = await self.calculate_employee_month(employee, month)
             if entity is None:
                 continue
@@ -170,6 +170,7 @@ class KpiService:
                 [
                     f"Группа       {title}",
                     f"Период      {month:%m.%Y}",
+                    *_month_period_lines(month),
                     f"Сотрудников {len(employees)}",
                     f"База KPI    {money(total_base)}",
                 ]
@@ -197,6 +198,24 @@ def _next_month(month: date) -> date:
     if month.month == 12:
         return date(month.year + 1, 1, 1)
     return date(month.year, month.month + 1, 1)
+
+
+def _month_period_lines(month: date) -> list[str]:
+    start = month.replace(day=1)
+    today = date.today()
+    if start.year == today.year and start.month == today.month:
+        end = today
+    else:
+        end = _next_month(start) - date.resolution
+    return [f"Даты        {_date_range_label(start, end)}"]
+
+
+def _date_range_label(start: date, end: date) -> str:
+    if start == end:
+        return f"{start:%d.%m.%Y}"
+    if start.year == end.year:
+        return f"{start:%d.%m}-{end:%d.%m.%Y}"
+    return f"{start:%d.%m.%Y}-{end:%d.%m.%Y}"
 
 
 def _kpi_digest(

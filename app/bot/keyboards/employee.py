@@ -6,10 +6,10 @@ from app.models import NotificationSettings
 def employee_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="🎯 KPI")],
-            [KeyboardButton(text="📈 Grade Up"), KeyboardButton(text="💇 Услуги")],
-            [KeyboardButton(text="🧴 Товары"), KeyboardButton(text="📋 Регламент")],
-            [KeyboardButton(text="⚙ Настройки")],
+            [KeyboardButton(text="Статистика"), KeyboardButton(text="KPI")],
+            [KeyboardButton(text="Grade Up"), KeyboardButton(text="Услуги")],
+            [KeyboardButton(text="Товары"), KeyboardButton(text="Регламент")],
+            [KeyboardButton(text="Настройки")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите раздел",

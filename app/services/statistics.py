@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -5,12 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.logging import get_logger
 from app.config.settings import Settings
-from app.models import Employee
-from app.repositories import CompanyRepository, DailyStatisticRepository, EmployeeRepository, KpiRuleRepository
+from app.models import Branch, Employee
+from app.repositories import CompanyRepository, DailyStatisticRepository, KpiRuleRepository
 from app.services.security import EncryptionService
 from app.utils.exceptions import AppError
 from app.utils.telegram_formatting import blockquote, bold, money as format_money, pre, progress_bar
-from app.yclients.client import YClientsClient
+from app.yclients.client import YClientsClient, _calculate_daily_statistic, _record_statistic_date
 from app.yclients.types import YClientsDailyStatistic
 
 logger = get_logger(__name__)
@@ -20,7 +21,6 @@ class StatisticsService:
     def __init__(self, session: AsyncSession, settings: Settings) -> None:
         self._settings = settings
         self._companies = CompanyRepository(session)
-        self._employees = EmployeeRepository(session)
         self._daily_stats = DailyStatisticRepository(session)
         self._kpi_rules = KpiRuleRepository(session)
         self._encryption = EncryptionService(settings)
@@ -29,14 +29,7 @@ class StatisticsService:
         company = await self._companies.get_default()
         if company is None:
             return None
-        client = YClientsClient(
-            base_url=self._settings.yclients_base_url_str,
-            partner_token=self._encryption.decrypt(company.encrypted_yclients_api_key)
-            or self._settings.yclients_partner_token,
-            user_token=self._encryption.decrypt(company.encrypted_yclients_user_token)
-            or self._settings.yclients_user_token,
-            timeout_seconds=self._settings.yclients_timeout_seconds,
-        )
+        client = self._client_for_company(company)
         branch = employee.branch
         if branch is None:
             return None
@@ -45,19 +38,72 @@ class StatisticsService:
             employee_staff_id=employee.yclients_staff_id,
             statistic_date=statistic_date,
         )
-        await self._daily_stats.upsert(
-            employee_id=employee.id,
-            statistic_date=statistic_date,
-            haircuts_count=remote_stat.haircuts_count,
-            service_revenue=remote_stat.service_revenue,
-            additional_services_revenue=remote_stat.additional_services_revenue,
-            total_revenue=remote_stat.total_revenue,
-            average_check=remote_stat.average_check,
-            attendance_percent=remote_stat.attendance_percent,
-            products_sold=remote_stat.products_sold,
-            products_revenue=remote_stat.products_revenue,
-        )
+        await self._upsert_daily_stat(employee, remote_stat)
         return remote_stat
+
+    async def sync_branch_period(
+        self,
+        branch: Branch,
+        employees: list[Employee],
+        date_from: date,
+        date_to: date,
+    ) -> list[YClientsDailyStatistic]:
+        company = await self._companies.get_default()
+        if company is None:
+            return []
+        client = self._client_for_company(company)
+        records = await client.list_records(
+            company_id=branch.yclients_branch_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        records_by_day = _records_by_day(records, date_from=date_from, date_to=date_to)
+        remote_stats: list[YClientsDailyStatistic] = []
+        day = date_from
+        while day <= date_to:
+            day_records = records_by_day.get(day, [])
+            for employee in employees:
+                remote_stat = _calculate_daily_statistic(
+                    employee.yclients_staff_id,
+                    day,
+                    day_records,
+                    include_records_without_staff=False,
+                )
+                await self._upsert_daily_stat(employee, remote_stat)
+                remote_stats.append(remote_stat)
+            day += timedelta(days=1)
+        return remote_stats
+
+    async def sync_employee_period(
+        self,
+        employee: Employee,
+        date_from: date,
+        date_to: date,
+    ) -> list[YClientsDailyStatistic]:
+        company = await self._companies.get_default()
+        if company is None or employee.branch is None:
+            return []
+        client = self._client_for_company(company)
+        records = await client.list_records(
+            company_id=employee.branch.yclients_branch_id,
+            date_from=date_from,
+            date_to=date_to,
+            employee_staff_id=employee.yclients_staff_id,
+        )
+        records_by_day = _records_by_day(records, date_from=date_from, date_to=date_to)
+        remote_stats: list[YClientsDailyStatistic] = []
+        day = date_from
+        while day <= date_to:
+            remote_stat = _calculate_daily_statistic(
+                employee.yclients_staff_id,
+                day,
+                records_by_day.get(day, []),
+                include_records_without_staff=True,
+            )
+            await self._upsert_daily_stat(employee, remote_stat)
+            remote_stats.append(remote_stat)
+            day += timedelta(days=1)
+        return remote_stats
 
     async def get_period_stats(self, employee: Employee, period: str) -> list:
         start, today = _period_bounds(period)
@@ -65,13 +111,23 @@ class StatisticsService:
 
     async def refresh_period(self, employee: Employee, period: str) -> list[YClientsDailyStatistic]:
         start, end = _period_bounds(period)
-        remote_stats: list[YClientsDailyStatistic] = []
+        if employee.branch is not None:
+            return await self.sync_employee_period(employee, start, end)
         day = start
+        remote_stats: list[YClientsDailyStatistic] = []
         while day <= end:
             remote_stat = await self.sync_employee_day(employee, day)
             if remote_stat is not None:
                 remote_stats.append(remote_stat)
             day += timedelta(days=1)
+        return remote_stats
+
+    async def refresh_team_period(self, employees: list[Employee], period: str) -> list[YClientsDailyStatistic]:
+        start, end = _period_bounds(period)
+        remote_stats: list[YClientsDailyStatistic] = []
+        grouped = _employees_by_branch(employees)
+        for branch, branch_employees in grouped:
+            remote_stats.extend(await self.sync_branch_period(branch, branch_employees, start, end))
         return remote_stats
 
     async def employee_stats_text(self, employee: Employee, period: str = "month", *, refresh: bool = True) -> str:
@@ -133,6 +189,7 @@ class StatisticsService:
         ]
         parts = [
             bold(f"СТАТИСТИКА {title}"),
+            pre(_period_lines(period)),
             pre(sidebar),
             pre(metrics),
         ]
@@ -166,25 +223,26 @@ class StatisticsService:
                 ]
             )
 
-        rows = []
         refresh_errors = 0
         first_refresh_warning: str | None = None
-        for employee in employees:
-            refresh_warning: str | None = None
-            if refresh:
+        if refresh:
+            for branch, branch_employees in _employees_by_branch(employees):
                 try:
-                    await self.refresh_period(employee, period)
+                    await self.sync_branch_period(branch, branch_employees, *_period_bounds(period))
                 except AppError as exc:
-                    refresh_warning = yclients_data_error_hint(exc.public_message)
-                    refresh_errors += 1
+                    refresh_errors += len(branch_employees)
+                    if first_refresh_warning is None:
+                        first_refresh_warning = yclients_data_error_hint(exc.public_message)
                 except Exception as exc:
-                    logger.exception("team_stats_refresh_failed", employee_id=str(employee.id), period=period)
-                    refresh_warning = yclients_data_error_hint(
-                        f"Не удалось обновить данные из YCLIENTS: {str(exc)[:200]}"
-                    )
-                    refresh_errors += 1
-                if refresh_warning and first_refresh_warning is None:
-                    first_refresh_warning = refresh_warning
+                    logger.exception("team_stats_refresh_failed", branch_id=str(branch.id), period=period)
+                    refresh_errors += len(branch_employees)
+                    if first_refresh_warning is None:
+                        first_refresh_warning = yclients_data_error_hint(
+                            f"Не удалось обновить данные из YCLIENTS: {str(exc)[:200]}"
+                        )
+
+        rows = []
+        for employee in employees:
             stats = await self.get_period_stats(employee, period)
             haircuts_count = sum(item.haircuts_count for item in stats)
             service_revenue = sum((item.service_revenue for item in stats), Decimal("0"))
@@ -204,7 +262,6 @@ class StatisticsService:
                     "products_revenue": products_revenue,
                     "total_revenue": total_revenue,
                     "kpi_base": service_revenue + additional_services_revenue,
-                    "refresh_warning": refresh_warning,
                     "stats_count": len(stats),
                 }
             )
@@ -221,6 +278,7 @@ class StatisticsService:
         summary = [
             f"Группа       {title}",
             f"Период      {_period_title(period)}",
+            *_period_lines(period),
             f"Сотрудников {len(employees)}",
             f"Стрижек     {total_haircuts}",
             f"Услуги      {money(service_revenue)}",
@@ -259,6 +317,30 @@ class StatisticsService:
         if digest:
             parts.append(blockquote(digest))
         return "\n\n".join(parts)
+
+    def _client_for_company(self, company) -> YClientsClient:
+        return YClientsClient(
+            base_url=self._settings.yclients_base_url_str,
+            partner_token=self._encryption.decrypt(company.encrypted_yclients_api_key)
+            or self._settings.yclients_partner_token,
+            user_token=self._encryption.decrypt(company.encrypted_yclients_user_token)
+            or self._settings.yclients_user_token,
+            timeout_seconds=self._settings.yclients_timeout_seconds,
+        )
+
+    async def _upsert_daily_stat(self, employee: Employee, remote_stat: YClientsDailyStatistic) -> None:
+        await self._daily_stats.upsert(
+            employee_id=employee.id,
+            statistic_date=remote_stat.statistic_date,
+            haircuts_count=remote_stat.haircuts_count,
+            service_revenue=remote_stat.service_revenue,
+            additional_services_revenue=remote_stat.additional_services_revenue,
+            total_revenue=remote_stat.total_revenue,
+            average_check=remote_stat.average_check,
+            attendance_percent=remote_stat.attendance_percent,
+            products_sold=remote_stat.products_sold,
+            products_revenue=remote_stat.products_revenue,
+        )
 
     async def _next_kpi_goal(self, kpi_base: Decimal) -> Decimal | None:
         company = await self._companies.get_default()
@@ -315,6 +397,58 @@ def _period_title(period: str) -> str:
         "month": "ЗА МЕСЯЦ",
         "previous_month": "ЗА ПРОШЛЫЙ МЕСЯЦ",
     }.get(period, "ЗА ПЕРИОД")
+
+
+def _period_lines(period: str) -> list[str]:
+    start, end = _period_bounds(period)
+    month_label = (
+        f"{start:%m.%Y}"
+        if start.month == end.month and start.year == end.year
+        else f"{start:%m.%Y}-{end:%m.%Y}"
+    )
+    return [
+        f"Месяц       {month_label}",
+        f"Даты        {_date_range_label(start, end)}",
+    ]
+
+
+def _date_range_label(start: date, end: date) -> str:
+    if start == end:
+        return f"{start:%d.%m.%Y}"
+    if start.year == end.year:
+        return f"{start:%d.%m}-{end:%d.%m.%Y}"
+    return f"{start:%d.%m.%Y}-{end:%d.%m.%Y}"
+
+
+def _records_by_day(
+    records: list[dict],
+    *,
+    date_from: date,
+    date_to: date,
+) -> dict[date, list[dict]]:
+    grouped: dict[date, list[dict]] = defaultdict(list)
+    single_day = date_from == date_to
+    for record in records:
+        record_day = _record_statistic_date(record)
+        if record_day is None:
+            if single_day:
+                grouped[date_from].append(record)
+            continue
+        if date_from <= record_day <= date_to:
+            grouped[record_day].append(record)
+    return grouped
+
+
+def _employees_by_branch(employees: list[Employee]) -> list[tuple[Branch, list[Employee]]]:
+    by_branch: dict[str, tuple[Branch, list[Employee]]] = {}
+    for employee in employees:
+        if employee.branch is None:
+            continue
+        branch_key = str(employee.branch.id)
+        if branch_key not in by_branch:
+            by_branch[branch_key] = (employee.branch, [])
+        by_branch[branch_key][1].append(employee)
+    return list(by_branch.values())
 
 
 def _stats_digest(

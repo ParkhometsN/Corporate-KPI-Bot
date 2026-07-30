@@ -16,7 +16,7 @@ from app.models import Company, Employee
 from app.repositories import CompanyRepository, ServiceRepository
 from app.services.security import EncryptionService
 from app.utils.exceptions import AppError
-from app.utils.telegram_formatting import blockquote, bold, html_escape, money, pre, shorten
+from app.utils.telegram_formatting import blockquote, bold, money, pre, shorten
 from app.yclients.client import YClientsClient
 from app.yclients.types import YClientsProduct
 
@@ -42,26 +42,26 @@ class CatalogService:
 
         parts: list[str] = [
             bold("УСЛУГИ"),
-            blockquote(
+            pre(
                 [
-                    f"Позиций: {len(services)}.",
-                    "Одинаковые названия сгруппированы, цены показаны вариантами.",
+                    f"Позиций     {len(services)}",
+                    "Группировка одинаковые названия",
                 ]
             ),
         ]
         show_categories = len(grouped) > 1 or "Без категории" not in grouped
         for category, titles in grouped.items():
-            category_lines: list[str] = []
+            category_lines: list[str] = [f"{'Услуга':30} Цены"]
             if show_categories:
                 parts.append(bold(category.upper()))
             for item in titles.values():
                 prices = sorted(item["prices"], key=lambda price: (price[0], price[1]))
                 price_line = " · ".join(_price_range(price_min, price_max) for price_min, price_max in prices)
-                category_lines.append(
-                    f"• <b>{html_escape(shorten(item['title'], 72))}</b>\n"
-                    f"  <code>{html_escape(price_line)}</code>"
-                )
-            parts.append("\n".join(category_lines))
+                price_chunks = _split_text(price_line, 30)
+                category_lines.append(f"{shorten(item['title'], 30):30} {price_chunks[0] if price_chunks else '-'}")
+                for chunk in price_chunks[1:]:
+                    category_lines.append(f"{'':30} {chunk}")
+            parts.append(pre(category_lines))
         return "\n\n".join(parts)
 
     async def services_rich_message(self, employee: Employee) -> InputRichMessage:
@@ -196,6 +196,22 @@ def _table_cell(text: str, *, is_header: bool = False, colspan: int | None = Non
         is_header=is_header,
         colspan=colspan,
     )
+
+
+def _split_text(text: str, width: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        if len(current) + 1 + len(word) <= width:
+            current = f"{current} {word}"
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
 
 
 def _stock_text(value: Decimal) -> str:

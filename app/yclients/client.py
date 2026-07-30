@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -164,6 +164,42 @@ class YClientsClient:
             raise last_error
         return []
 
+    async def list_records(
+        self,
+        *,
+        company_id: int,
+        date_from: date,
+        date_to: date,
+        employee_staff_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        page = 1
+        count = 200
+        records: list[dict[str, Any]] = []
+        seen_pages: set[tuple[str, ...]] = set()
+        while True:
+            params: dict[str, Any] = {
+                "start_date": date_from.isoformat(),
+                "end_date": date_to.isoformat(),
+                "page": page,
+                "count": count,
+            }
+            if employee_staff_id is not None:
+                params["staff_id"] = employee_staff_id
+            data = await self._request("GET", f"records/{company_id}", params=params, user_required=True)
+            items = self._as_list(self._unwrap_data(data))
+            page_signature = _records_page_signature(items)
+            if page_signature in seen_pages:
+                break
+            seen_pages.add(page_signature)
+            records.extend(items)
+            total_count = _extract_total_count(data)
+            if not items or len(items) < count or (total_count is not None and len(records) >= total_count):
+                break
+            if page >= 50:
+                break
+            page += 1
+        return records
+
     async def get_daily_statistics(
         self,
         *,
@@ -171,17 +207,12 @@ class YClientsClient:
         employee_staff_id: int,
         statistic_date: date,
     ) -> YClientsDailyStatistic:
-        data = await self._request(
-            "GET",
-            f"records/{company_id}",
-            params={
-                "staff_id": employee_staff_id,
-                "start_date": statistic_date.isoformat(),
-                "end_date": statistic_date.isoformat(),
-            },
-            user_required=True,
+        records = await self.list_records(
+            company_id=company_id,
+            date_from=statistic_date,
+            date_to=statistic_date,
+            employee_staff_id=employee_staff_id,
         )
-        records = self._as_list(self._unwrap_data(data))
         return _calculate_daily_statistic(employee_staff_id, statistic_date, records)
 
     async def _request(
@@ -315,6 +346,28 @@ def _extract_payload_message(payload: Any) -> str | None:
     return None
 
 
+def _extract_total_count(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    for key in ("total_count", "total", "count"):
+        if meta.get(key) is not None:
+            try:
+                return int(meta[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _records_page_signature(items: list[dict[str, Any]]) -> tuple[str, ...]:
+    return tuple(
+        str(item.get("id") or item.get("record_id") or item.get("visit_id") or index)
+        for index, item in enumerate(items)
+    )
+
+
 def _extract_category(item: dict[str, Any]) -> str | None:
     for key in ("category_title", "category", "rank", "level"):
         value = item.get(key)
@@ -372,8 +425,18 @@ def _calculate_daily_statistic(
     employee_staff_id: int,
     statistic_date: date,
     records: Iterable[dict[str, Any]],
+    *,
+    include_records_without_staff: bool = True,
 ) -> YClientsDailyStatistic:
-    records_list = list(records)
+    records_list = [
+        record
+        for record in records
+        if _record_belongs_to_staff(
+            record,
+            employee_staff_id,
+            include_records_without_staff=include_records_without_staff,
+        )
+    ]
     visited_records = [record for record in records_list if _is_attended(record)]
 
     haircuts_count = len(visited_records)
@@ -418,6 +481,39 @@ def _calculate_daily_statistic(
     )
 
 
+def _record_belongs_to_staff(
+    record: dict[str, Any],
+    employee_staff_id: int,
+    *,
+    include_records_without_staff: bool,
+) -> bool:
+    record_staff_id = _record_staff_id(record)
+    if record_staff_id is None:
+        return include_records_without_staff
+    return record_staff_id == employee_staff_id
+
+
+def _record_staff_id(record: dict[str, Any]) -> int | None:
+    for key in ("staff_id", "staffId", "master_id", "employee_id"):
+        if record.get(key) is not None:
+            return _maybe_int(record.get(key))
+    staff = record.get("staff") or record.get("master") or record.get("employee")
+    if isinstance(staff, dict):
+        for key in ("id", "staff_id", "staffId"):
+            if staff.get(key) is not None:
+                return _maybe_int(staff.get(key))
+    return None
+
+
+def _record_statistic_date(record: dict[str, Any]) -> date | None:
+    for key in ("date", "datetime", "time", "visit_date", "created_at"):
+        value = record.get(key)
+        parsed_date = _parse_date_value(value)
+        if parsed_date is not None:
+            return parsed_date
+    return None
+
+
 def _extract_record_services(record: dict[str, Any]) -> list[dict[str, Any]]:
     services = record.get("services") or record.get("visit_services") or []
     return [item for item in services if isinstance(item, dict)] if isinstance(services, list) else []
@@ -446,8 +542,36 @@ def _to_int(value: Any) -> int:
     return int(value or 0)
 
 
+def _maybe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _to_decimal(value: Any) -> Decimal:
     try:
         return Decimal(str(value or 0))
     except (InvalidOperation, ValueError):
         return Decimal("0")
+
+
+def _parse_date_value(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value).date()
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(value).strip()
+    if len(text) >= 10:
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+    return None

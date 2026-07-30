@@ -13,7 +13,7 @@ from app.utils.exceptions import AccessDeniedError
 router = Router(name="employee")
 
 
-@router.message(F.text == "📊 Статистика")
+@router.message(F.text.in_({"Статистика", "📊 Статистика"}))
 async def employee_statistics(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
     await answer_with_loading(
@@ -42,7 +42,7 @@ async def employee_statistics_period(callback: CallbackQuery, services: ServiceC
     )
 
 
-@router.message(F.text == "🎯 KPI")
+@router.message(F.text.in_({"KPI", "🎯 KPI"}))
 async def employee_kpi(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
     await answer_with_loading(
@@ -53,7 +53,7 @@ async def employee_kpi(message: Message, services: ServiceContainer) -> None:
     )
 
 
-@router.message(F.text == "📈 Grade Up")
+@router.message(F.text.in_({"Grade Up", "📈 Grade Up"}))
 async def employee_grade(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
     await answer_with_loading(
@@ -64,7 +64,7 @@ async def employee_grade(message: Message, services: ServiceContainer) -> None:
     )
 
 
-@router.message(F.text == "💇 Услуги")
+@router.message(F.text.in_({"Услуги", "💇 Услуги"}))
 async def employee_services(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
 
@@ -82,7 +82,7 @@ async def employee_services(message: Message, services: ServiceContainer) -> Non
     )
 
 
-@router.message(F.text == "🧴 Товары")
+@router.message(F.text.in_({"Товары", "🧴 Товары"}))
 async def employee_products(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
     await answer_with_loading(
@@ -93,13 +93,13 @@ async def employee_products(message: Message, services: ServiceContainer) -> Non
     )
 
 
-@router.message(F.text == "📋 Регламент")
+@router.message(F.text.in_({"Регламент", "📋 Регламент"}))
 async def employee_regulation(message: Message, services: ServiceContainer) -> None:
     await _require_employee(message, services)
     await message.answer(await services.admin.regulation_text())
 
 
-@router.message(F.text == "⚙ Настройки")
+@router.message(F.text.in_({"Настройки", "⚙ Настройки"}))
 async def employee_settings(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
     if employee.telegram_user is None:

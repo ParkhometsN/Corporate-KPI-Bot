@@ -2,7 +2,7 @@ from contextlib import suppress
 from uuid import UUID
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -11,6 +11,7 @@ from app.bot.keyboards.admin import (
     admin_dashboard_keyboard,
     admin_kpi_edit_keyboard,
     admin_kpi_keyboard,
+    admin_main_keyboard,
     admin_regulation_edit_keyboard,
     admin_regulation_keyboard,
     admin_reset_confirm_keyboard,
@@ -39,6 +40,7 @@ from app.bot.states.admin import (
     AdminYClientsLoginStates,
 )
 from app.services.factory import ServiceContainer
+from app.services.statistics import _period_lines
 from app.utils.exceptions import AppError
 from app.utils.telegram_formatting import blockquote, bold, html_escape, pre, shorten
 
@@ -55,7 +57,7 @@ async def admin_start(message: Message, state: FSMContext, services: ServiceCont
         await state.clear()
         await message.answer(
             await services.admin.dashboard_text(),
-            reply_markup=admin_dashboard_keyboard(),
+            reply_markup=admin_main_keyboard(),
         )
         return
     if not await services.admin.has_registered_admins():
@@ -88,7 +90,7 @@ async def admin_password(message: Message, state: FSMContext, services: ServiceC
     await state.clear()
     await message.answer(
         await services.admin.dashboard_text(),
-        reply_markup=admin_dashboard_keyboard(),
+        reply_markup=admin_main_keyboard(),
     )
 
 
@@ -103,25 +105,119 @@ async def admin_dashboard(callback: CallbackQuery, state: FSMContext, services: 
     await callback.answer()
 
 
+@router.message(StateFilter(None), F.text.in_({"Панель руководителя", "Главная"}))
+async def admin_dashboard_button(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+    await state.clear()
+    await message.answer(await services.admin.dashboard_text(), reply_markup=admin_main_keyboard())
+
+
+@router.message(StateFilter(None), F.text.in_({"Филиалы", "🏢 Филиалы"}))
+async def admin_branches_button(message: Message, services: ServiceContainer) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+    branches = await services.admin.list_branches()
+    await message.answer(_branches_text(branches), reply_markup=branches_keyboard(branches))
+
+
+@router.message(StateFilter(None), F.text.in_({"Статистика команды", "📊 Статистика команды"}))
+async def admin_team_stats_button(message: Message, services: ServiceContainer) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+
+    async def load_team_stats():
+        employees = await services.admin.get_team_employees()
+        return (
+            await services.statistics.team_stats_text(employees, "month", title="вся команда"),
+            team_stats_period_keyboard("month"),
+        )
+
+    await answer_with_loading(
+        message,
+        title="ЗАГРУЗКА СТАТИСТИКИ",
+        detail="Собираю данные по всем сотрудникам.",
+        producer=load_team_stats,
+    )
+
+
+@router.message(StateFilter(None), F.text.in_({"Действия для барберов", "📣 Действия для барберов"}))
+async def admin_broadcast_button(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+    await state.clear()
+    branches = await services.admin.list_branches()
+    if not branches:
+        await message.answer(
+            "\n\n".join(
+                [
+                    bold("ДЕЙСТВИЯ ДЛЯ БАРБЕРОВ"),
+                    blockquote("Сначала добавьте филиал и синхронизируйте сотрудников."),
+                ]
+            ),
+            reply_markup=admin_main_keyboard(),
+        )
+        return
+    if len(branches) == 1:
+        await _show_broadcast_actions(message, state, services, branches[0].id, edit=False)
+        return
+    await state.set_state(AdminBroadcastStates.choosing_branch)
+    await message.answer(
+        "\n\n".join(
+            [
+                bold("ДЕЙСТВИЯ ДЛЯ БАРБЕРОВ"),
+                blockquote("Выберите филиал или отправьте действие всем подключённым сотрудникам."),
+            ]
+        ),
+        reply_markup=broadcast_branch_keyboard(branches),
+    )
+
+
+@router.message(StateFilter(None), F.text == "Регламент компании")
+async def admin_regulation_button(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+    await state.clear()
+    await message.answer(
+        await services.admin.regulation_text(for_admin=True),
+        reply_markup=admin_regulation_keyboard(),
+    )
+
+
+@router.message(StateFilter(None), F.text == "KPI команды")
+async def admin_kpi_button(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+    await state.clear()
+    await message.answer(await services.admin.kpi_settings_text(), reply_markup=admin_kpi_keyboard())
+
+
+@router.message(StateFilter(None), F.text == "Настройки руководителя")
+async def admin_settings_button(message: Message, services: ServiceContainer) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+    await message.answer(bold("НАСТРОЙКИ"), reply_markup=admin_settings_keyboard())
+
+
+@router.message(StateFilter(None), F.text.in_({"Проверка подключения", "✅ Проверка подключения"}))
+async def admin_check_connection_button(message: Message, services: ServiceContainer) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+
+    async def check_connection():
+        text = await services.admin.check_connection_text()
+        try:
+            available, existing_ids = await services.admin.available_branches()
+            keyboard = available_branches_keyboard(available, existing_ids)
+        except Exception:
+            keyboard = admin_dashboard_keyboard()
+        return text, keyboard
+
+    await answer_with_loading(
+        message,
+        title="ПРОВЕРКА YCLIENTS",
+        detail="Запрашиваю доступные филиалы.",
+        producer=check_connection,
+    )
+
+
 @router.callback_query(F.data == "admin:branches")
 async def admin_branches(callback: CallbackQuery, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     branches = await services.admin.list_branches()
-    if branches:
-        text = "\n\n".join(
-            [
-                bold("ФИЛИАЛЫ"),
-                pre(
-                    [
-                        f"{shorten(branch.name, 26):26} {branch.yclients_branch_id:<8} {branch.sync_status.value}"
-                        for branch in branches
-                    ]
-                ),
-            ]
-        )
-    else:
-        text = "\n\n".join([bold("ФИЛИАЛЫ"), blockquote("Филиалы ещё не добавлены.")])
-    await callback.message.edit_text(text, reply_markup=branches_keyboard(branches))
+    await callback.message.edit_text(_branches_text(branches), reply_markup=branches_keyboard(branches))
     await callback.answer()
 
 
@@ -328,21 +424,20 @@ async def admin_yclients_password_text(
     async def connect_yclients():
         await services.admin.setup_yclients_login_password(login=login, password=password)
         await state.clear()
-        return (
-            "\n\n".join(
-                [
-                    bold("ВХОД В YCLIENTS ВЫПОЛНЕН"),
-                    blockquote(
-                        [
-                            "User token получен и сохранён.",
-                            "Статистика, записи, финансы и товары будут запрашиваться с правами этого аккаунта.",
-                        ]
-                    ),
-                    await services.admin.check_connection_text(),
-                ]
-            ),
-            admin_dashboard_keyboard(),
+        text = "\n\n".join(
+            [
+                bold("ВХОД В YCLIENTS ВЫПОЛНЕН"),
+                blockquote(
+                    [
+                        "User token получен и сохранён.",
+                        "Статистика, записи, финансы и товары будут запрашиваться с правами этого аккаунта.",
+                    ]
+                ),
+                await services.admin.check_connection_text(),
+            ]
         )
+        await message.answer(await services.admin.dashboard_text(), reply_markup=admin_main_keyboard())
+        return text, admin_dashboard_keyboard()
 
     try:
         await answer_with_loading(
@@ -601,7 +696,7 @@ async def setup_yclients_user_token(
                     blockquote("Теперь товары и статистика будут использовать обновлённые данные доступа."),
                 ]
             ),
-            reply_markup=admin_dashboard_keyboard(),
+            reply_markup=admin_main_keyboard(),
         )
         return
     data = await state.get_data()
@@ -628,7 +723,7 @@ async def setup_yclients_user_token(
                 ),
             ]
         ),
-        reply_markup=admin_dashboard_keyboard(),
+        reply_markup=admin_main_keyboard(),
     )
 
 
@@ -754,8 +849,8 @@ async def admin_broadcast_statistics_action(
         "\n\n".join(
             [
                 bold("СТАТИСТИКА ЗА ПРОШЛЫЙ МЕСЯЦ"),
-                pre([f"Кому       {scope}", f"Получателей {targets_count}"]),
-                blockquote("Каждый подключённый сотрудник получит свою личную статистику за прошлый календарный месяц."),
+                pre([f"Кому       {scope}", f"Получателей {targets_count}", *_period_lines("previous_month")]),
+                blockquote("Каждый подключённый сотрудник получит свою личную статистику за указанный период."),
             ]
         ),
         reply_markup=broadcast_confirm_keyboard("stats"),
@@ -1066,6 +1161,22 @@ def _branch_text(branch) -> str:
     )
 
 
+def _branches_text(branches) -> str:
+    if not branches:
+        return "\n\n".join([bold("ФИЛИАЛЫ"), blockquote("Филиалы ещё не добавлены.")])
+    return "\n\n".join(
+        [
+            bold("ФИЛИАЛЫ"),
+            pre(
+                [
+                    f"{shorten(branch.name, 26):26} {branch.yclients_branch_id:<8} {branch.sync_status.value}"
+                    for branch in branches
+                ]
+            ),
+        ]
+    )
+
+
 def _employees_text(employees) -> str:
     if not employees:
         return "\n\n".join([bold("СОТРУДНИКИ"), blockquote("Сотрудники пока не синхронизированы.")])
@@ -1117,20 +1228,23 @@ async def _show_broadcast_actions(
     state: FSMContext,
     services: ServiceContainer,
     branch_id: UUID | None,
+    *,
+    edit: bool = True,
 ) -> None:
     await state.update_data(broadcast_branch_id=str(branch_id) if branch_id else None)
     await state.set_state(AdminBroadcastStates.choosing_action)
     scope, targets_count = await _broadcast_scope_summary(state, services)
-    await message.edit_text(
-        "\n\n".join(
-            [
-                bold("ДЕЙСТВИЯ ДЛЯ БАРБЕРОВ"),
-                pre([f"Кому       {scope}", f"Получателей {targets_count}"]),
-                blockquote("Выберите действие. Получателями будут только сотрудники с подключённым Telegram."),
-            ]
-        ),
-        reply_markup=broadcast_action_keyboard(),
+    text = "\n\n".join(
+        [
+            bold("ДЕЙСТВИЯ ДЛЯ БАРБЕРОВ"),
+            pre([f"Кому       {scope}", f"Получателей {targets_count}"]),
+            blockquote("Выберите действие. Получателями будут только сотрудники с подключённым Telegram."),
+        ]
     )
+    if edit:
+        await message.edit_text(text, reply_markup=broadcast_action_keyboard())
+    else:
+        await message.answer(text, reply_markup=broadcast_action_keyboard())
 
 
 async def _broadcast_scope_summary(state: FSMContext, services: ServiceContainer) -> tuple[str, int]:
