@@ -154,16 +154,19 @@ class StatisticsService:
         return remote_stats
 
     async def employee_stats_text(self, employee: Employee, period: str = "month", *, refresh: bool = True) -> str:
-        refresh_warning: str | None = None
         remote_stats: list[YClientsDailyStatistic] = []
         if refresh:
             try:
                 remote_stats = await self.refresh_period(employee, period)
             except AppError as exc:
-                refresh_warning = yclients_data_error_hint(exc.public_message)
+                logger.warning(
+                    "employee_stats_refresh_app_error",
+                    employee_id=str(employee.id),
+                    period=period,
+                    error=exc.public_message[:200],
+                )
             except Exception as exc:
                 logger.exception("employee_stats_refresh_failed", employee_id=str(employee.id), period=period)
-                refresh_warning = yclients_data_error_hint(f"Не удалось обновить данные из YCLIENTS: {str(exc)[:200]}")
         stats = await self.get_period_stats(employee, period)
         title = {
             "today": "СЕГОДНЯ",
@@ -215,15 +218,6 @@ class StatisticsService:
         record_lines = _records_summary_lines(remote_stats)
         if record_lines:
             parts.append(pre(["Записи по API", *record_lines]))
-        digest = _stats_digest(
-            employee=employee,
-            stats_count=len(stats),
-            haircuts_count=haircuts_count,
-            total_revenue=total_revenue,
-            refresh_warning=refresh_warning,
-        )
-        if digest:
-            parts.append(blockquote(digest))
         return "\n\n".join(parts)
 
     async def team_stats_text(
@@ -242,8 +236,6 @@ class StatisticsService:
                 ]
             )
 
-        refresh_errors = 0
-        first_refresh_warning: str | None = None
         limited_staff_by_branch: dict[str, set[int]] = {}
         if refresh:
             for branch, branch_employees in _employees_by_branch(employees):
@@ -254,16 +246,15 @@ class StatisticsService:
                     if synced_staff_ids and synced_staff_ids < branch_staff_ids:
                         limited_staff_by_branch[str(branch.id)] = synced_staff_ids
                 except AppError as exc:
-                    refresh_errors += len(branch_employees)
-                    if first_refresh_warning is None:
-                        first_refresh_warning = yclients_data_error_hint(exc.public_message)
+                    logger.warning(
+                        "team_stats_refresh_app_error",
+                        branch_id=str(branch.id),
+                        period=period,
+                        employees=len(branch_employees),
+                        error=exc.public_message[:200],
+                    )
                 except Exception as exc:
                     logger.exception("team_stats_refresh_failed", branch_id=str(branch.id), period=period)
-                    refresh_errors += len(branch_employees)
-                    if first_refresh_warning is None:
-                        first_refresh_warning = yclients_data_error_hint(
-                            f"Не удалось обновить данные из YCLIENTS: {str(exc)[:200]}"
-                        )
 
         rows = []
         for employee in employees:
@@ -339,7 +330,7 @@ class StatisticsService:
             if row["data_unavailable"]:
                 table.append(
                     f"{branch_name:11} {shorten(employee.full_name, 16):16} "
-                    f"{'-':>3} {'-':>8} {'нет API':>11} {'-':>11}"
+                    f"{'-':>3} {'-':>8} {'нет данных':>11} {'-':>11}"
                 )
             else:
                 table.append(
@@ -351,40 +342,11 @@ class StatisticsService:
                     f"{money(row['kpi_base']):>11}"
                 )
 
-        digest = []
-        zero_rows = [row for row in rows if row["stats_count"] == 0 and not row["data_unavailable"]]
-        if refresh_errors:
-            digest.append(f"ДАЙДЖЕСТ: по {refresh_errors} сотрудникам YCLIENTS не обновил данные.")
-            if first_refresh_warning:
-                digest.append(first_refresh_warning)
-        if unavailable_rows:
-            unavailable_names = ", ".join(row["employee"].full_name for row in unavailable_rows[:4])
-            if len(unavailable_rows) > 4:
-                unavailable_names = f"{unavailable_names} и ещё {len(unavailable_rows) - 4}"
-            digest.append(
-                "ДАЙДЖЕСТ: YCLIENTS отдал свежие записи не по всей команде. "
-                f"Сотрудники без свежих строк не показаны как ноль: {unavailable_names}. "
-                "Это неполный ответ records API, а не доказательство нулевой выручки."
-            )
-        if zero_rows:
-            digest.append(f"ДАЙДЖЕСТ: по {len(zero_rows)} сотрудникам нет дневных строк за период.")
-        one_employee = _single_employee_with_data(rows)
-        if one_employee is not None and (zero_rows or unavailable_rows):
-            digest.append(
-                "ДАЙДЖЕСТ: YCLIENTS отдал записи только по одному staff_id "
-                f"({one_employee.full_name}). Если остальные сотрудники работали, текущий User token "
-                "ограничен этим сотрудником или отчетный API не видит командный журнал."
-            )
-        if total_revenue == 0:
-            digest.append("ДАЙДЖЕСТ: общая выручка за выбранный период равна 0 ₽.")
-
         parts = [
             bold(f"СТАТИСТИКА {_period_title(period)}"),
             pre(summary),
             pre(table),
         ]
-        if digest:
-            parts.append(blockquote(digest))
         return "\n\n".join(parts)
 
     def _client_for_company(self, company) -> YClientsClient:
@@ -559,40 +521,6 @@ def _records_summary_lines(remote_stats: list[YClientsDailyStatistic]) -> list[s
         f"Новые       {new_clients} / {_percent_text(new_clients, len(client_records))}",
         f"Повторные   {repeat_clients} / {_percent_text(repeat_clients, len(client_records))}",
     ]
-
-
-def _single_employee_with_data(rows: list[dict]) -> Employee | None:
-    nonzero = [row for row in rows if row["total_revenue"] > 0 or row["haircuts_count"] > 0]
-    if len(nonzero) != 1:
-        return None
-    return nonzero[0]["employee"]
-
-
-def _stats_digest(
-    *,
-    employee: Employee,
-    stats_count: int,
-    haircuts_count: int,
-    total_revenue: Decimal,
-    refresh_warning: str | None,
-) -> list[str]:
-    digest: list[str] = []
-    if employee.branch is None:
-        digest.append("ДАЙДЖЕСТ: у сотрудника не найден филиал, поэтому YCLIENTS не знает, откуда брать записи.")
-    if refresh_warning:
-        digest.append(f"ДАЙДЖЕСТ: свежие данные не подтянулись: {refresh_warning}")
-    if stats_count == 0:
-        digest.append("ДАЙДЖЕСТ: в локальной базе нет дневных строк за период.")
-    elif haircuts_count == 0:
-        digest.append("ДАЙДЖЕСТ: строки есть, но посещений за период нет.")
-    elif total_revenue == 0:
-        digest.append("ДАЙДЖЕСТ: посещения есть, но YCLIENTS вернул нулевую выручку.")
-    if digest:
-        digest.append(
-            "Для полной статистики нужны: рабочий API key, права ключа/токена на записи и финансы, "
-            "точный ID филиала, staff_id сотрудника и правило, какие статусы записей считать оплаченными."
-        )
-    return digest
 
 
 def _service_lines_by_day(remote_stats: list[YClientsDailyStatistic], *, limit: int = 18) -> list[str]:

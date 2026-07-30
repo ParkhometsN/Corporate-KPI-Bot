@@ -34,6 +34,7 @@ class YClientsProduct:
     title: str
     price: Decimal
     stock_amount: Decimal
+    category: str | None = None
 
 
 @dataclass(slots=True)
@@ -49,4 +50,3 @@ class YClientsDailyStatistic:
     products_sold: int
     products_revenue: Decimal
     raw_payload: dict[str, Any]
-

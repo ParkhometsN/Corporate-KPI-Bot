@@ -2,11 +2,18 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
+from app.services.catalog import _normalize_title, _product_sort_key, _wrap_text, _wrap_tokens
 from app.services.grade import _find_current_and_next, _grade_period_bounds, progress_bar
 from app.services.kpi import _earned_percent_from_rules, _kpi_bonus_base, _next_month
-from app.services.catalog import _normalize_title
 from app.services.statistics import _period_bounds
-from app.yclients.client import _calculate_daily_statistic, _extract_user_token, _record_statistic_date
+from app.yclients.client import (
+    _calculate_daily_statistic,
+    _extract_user_token,
+    _product_from_item,
+    _products_page_signature,
+    _record_statistic_date,
+)
+from app.yclients.types import YClientsProduct
 
 
 def test_next_month_regular_and_year_boundary() -> None:
@@ -126,3 +133,65 @@ def test_extract_user_token_from_auth_payload_variants() -> None:
 
 def test_record_statistic_date_from_yclients_date_string() -> None:
     assert _record_statistic_date({"date": "2026-07-30 18:00:00"}) == date(2026, 7, 30)
+
+
+def test_product_page_signature_uses_good_id() -> None:
+    first_page = [{"good_id": 1}, {"good_id": 2}]
+    second_page = [{"good_id": 3}, {"good_id": 4}]
+
+    assert _products_page_signature(first_page) != _products_page_signature(second_page)
+
+
+def test_product_stock_uses_actual_amounts() -> None:
+    product = _product_from_item(
+        {
+            "good_id": 22186850,
+            "title": "Volcano Увлажняющий крем 50 мл",
+            "cost": 3200,
+            "category": "VOLCANO",
+            "actual_amounts": [{"amount": 1}, {"amount": "2.5"}],
+        }
+    )
+
+    assert product is not None
+    assert product.stock_amount == Decimal("3.5")
+    assert product.category == "VOLCANO"
+
+
+def test_products_sort_stock_goods_before_certificates() -> None:
+    products = [
+        YClientsProduct(1, "Сертификат «Стрижка»", Decimal("1400"), Decimal("0"), "Сертификаты"),
+        YClientsProduct(2, "Reuzel Зеленый 113гр", Decimal("2000"), Decimal("0"), "REUZEL"),
+        YClientsProduct(3, "Volcano Увлажняющий крем 50 мл", Decimal("3200"), Decimal("2"), "VOLCANO"),
+    ]
+
+    sorted_titles = [product.title for product in sorted(products, key=_product_sort_key)]
+
+    assert sorted_titles == [
+        "Reuzel Зеленый 113гр",
+        "Volcano Увлажняющий крем 50 мл",
+        "Сертификат «Стрижка»",
+    ]
+
+
+def test_wrap_text_respects_indented_width() -> None:
+    lines = _wrap_text(
+        "Стрижка + Оформление бороды + Камуфляж",
+        24,
+        first_indent="  ",
+        next_indent="  ",
+    )
+
+    assert all(len(line) <= 24 for line in lines)
+    assert lines[0].startswith("  ")
+
+
+def test_wrap_tokens_keeps_money_values_together() -> None:
+    lines = _wrap_tokens(
+        ["700 ₽", "1 200 ₽", "2 300 ₽", "3 000 ₽"],
+        28,
+        indent="  ",
+    )
+
+    assert all("3\n" not in line for line in lines)
+    assert any("3 000 ₽" in line for line in lines)

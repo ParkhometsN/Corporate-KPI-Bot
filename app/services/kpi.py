@@ -7,7 +7,7 @@ from app.config.logging import get_logger
 from app.config.settings import Settings
 from app.models import Employee, EmployeeKpi
 from app.repositories import CompanyRepository, EmployeeKpiRepository, KpiRuleRepository, MonthlyStatisticRepository
-from app.services.statistics import StatisticsService, money, yclients_data_error_hint
+from app.services.statistics import StatisticsService, money
 from app.utils.exceptions import AppError
 from app.utils.telegram_formatting import blockquote, bold, pre, progress_bar
 from app.utils.datetime import utc_now_naive
@@ -55,20 +55,23 @@ class KpiService:
         refresh: bool = True,
     ) -> str:
         month = (month or date.today()).replace(day=1)
-        refresh_warning: str | None = None
         if refresh:
             try:
                 await self._statistics.refresh_period(employee, "month")
             except AppError as exc:
-                refresh_warning = yclients_data_error_hint(exc.public_message)
+                logger.warning(
+                    "employee_kpi_refresh_app_error",
+                    employee_id=str(employee.id),
+                    month=month.isoformat(),
+                    error=exc.public_message[:200],
+                )
             except Exception as exc:
                 logger.exception("employee_kpi_refresh_failed", employee_id=str(employee.id), month=month.isoformat())
-                refresh_warning = yclients_data_error_hint(f"Не удалось обновить данные из YCLIENTS: {str(exc)[:200]}")
         entity = await self.calculate_employee_month(employee, month)
         if entity is None:
             return (
                 f"{bold('KPI')}\n\n"
-                f"{blockquote('ДАЙДЖЕСТ KPI: компания не настроена, поэтому правила KPI недоступны.')}"
+                f"{blockquote('Компания не настроена, поэтому правила KPI недоступны.')}"
             )
         monthly_stat = await self._monthly_stats.get_for_employee(employee.id, month)
         goal_amount = await self._next_kpi_goal(entity.kpi_base_amount)
@@ -100,16 +103,11 @@ class KpiService:
             f"До цели     {money(amount_left) if amount_left is not None else 'не задано'}",
             f"Прогресс    {progress_bar(goal_progress)} {goal_progress:.0f}%",
         ]
-        digest = _kpi_digest(
-            entity=entity,
-            daily_rows=monthly_stat.haircuts_count if monthly_stat else 0,
-            refresh_warning=refresh_warning,
-        )
         parts = [
             bold("KPI"),
             pre(summary),
             pre(progress),
-            blockquote(digest),
+            blockquote(_kpi_comment_lines()),
         ]
         return "\n\n".join(parts)
 
@@ -126,21 +124,20 @@ class KpiService:
             return "\n\n".join([bold("KPI КОМАНДЫ"), blockquote("Сотрудники пока не синхронизированы.")])
 
         rows = []
-        refresh_errors = 0
-        first_refresh_warning: str | None = None
         total_base = Decimal("0")
         if refresh:
             try:
                 await self._statistics.refresh_team_period(employees, "month")
             except AppError as exc:
-                refresh_errors = len(employees)
-                first_refresh_warning = yclients_data_error_hint(exc.public_message)
+                logger.warning(
+                    "team_kpi_refresh_app_error",
+                    title=title,
+                    month=month.isoformat(),
+                    employees=len(employees),
+                    error=exc.public_message[:200],
+                )
             except Exception as exc:
                 logger.exception("team_kpi_refresh_failed", title=title, month=month.isoformat())
-                refresh_errors = len(employees)
-                first_refresh_warning = yclients_data_error_hint(
-                    f"Не удалось обновить данные из YCLIENTS: {str(exc)[:200]}"
-                )
         for employee in employees:
             entity = await self.calculate_employee_month(employee, month)
             if entity is None:
@@ -157,15 +154,6 @@ class KpiService:
                 f"{entity.applies_from_month:%m.%Y}"
             )
 
-        digest = [
-            "KPI база считается как дополнительные услуги + товары.",
-            "Порог 37 000 ₽ даёт +2%, порог 60 000 ₽ даёт +5% к проценту от услуг.",
-            "Процент применяется со следующего месяца после закрытия текущего.",
-        ]
-        if first_refresh_warning:
-            digest.append(first_refresh_warning)
-        digest.append(f"Ошибок обновления: {refresh_errors}" if refresh_errors else "Данные обновлены без ошибок.")
-
         parts = [
             bold("KPI КОМАНДЫ"),
             pre(
@@ -178,7 +166,7 @@ class KpiService:
                 ]
             ),
             pre(table),
-            blockquote(digest),
+            blockquote(_kpi_comment_lines()),
         ]
         return "\n\n".join(parts)
 
@@ -251,22 +239,9 @@ def _kpi_goal_line(goal_amount: Decimal | None, goal_percent: Decimal | None) ->
     return f"{money(goal_amount)} для +{goal_percent.quantize(Decimal('0.01'))}%"
 
 
-def _kpi_digest(
-    *,
-    entity: EmployeeKpi,
-    daily_rows: int,
-    refresh_warning: str | None,
-) -> list[str]:
-    digest = [
+def _kpi_comment_lines() -> list[str]:
+    return [
         "KPI база считается как дополнительные услуги + товары.",
         "Порог 37 000 ₽ даёт +2%, порог 60 000 ₽ даёт +5% к проценту от услуг.",
         "Процент не применяется сразу: он переносится на следующий месяц после закрытия текущего.",
     ]
-    if refresh_warning:
-        digest.insert(0, f"ДАЙДЖЕСТ KPI: свежие данные не подтянулись: {refresh_warning}")
-    elif entity.kpi_base_amount == 0:
-        if daily_rows == 0:
-            digest.insert(0, "ДАЙДЖЕСТ KPI: за месяц нет посещений в дневной статистике.")
-        else:
-            digest.insert(0, "ДАЙДЖЕСТ KPI: записи есть, но сумма доп. услуг и товаров равна 0 ₽.")
-    return digest

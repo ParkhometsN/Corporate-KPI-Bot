@@ -129,26 +129,9 @@ class YClientsClient:
         for user_required in auth_modes:
             for endpoint in endpoints:
                 try:
-                    data = await self._request("GET", endpoint, user_required=user_required)
-                    items = self._as_list(self._unwrap_data(data))
-                    return [
-                        YClientsProduct(
-                            id=_to_int(item.get("id") or item.get("good_id") or item.get("product_id")),
-                            title=str(item.get("title") or item.get("name") or "Товар"),
-                            price=_to_decimal(item.get("price") or item.get("cost") or 0),
-                            stock_amount=_to_decimal(
-                                item.get("amount")
-                                or item.get("stock_amount")
-                                or item.get("quantity")
-                                or item.get("balance")
-                                or 0
-                            ),
-                        )
-                        for item in items
-                        if item.get("id") is not None
-                        or item.get("good_id") is not None
-                        or item.get("product_id") is not None
-                    ]
+                    products = await self._list_products_endpoint(endpoint, user_required=user_required)
+                    if products:
+                        return products
                 except YClientsApiError as exc:
                     if exc.status_code in {401, 403}:
                         permission_error = exc
@@ -163,6 +146,65 @@ class YClientsClient:
                 return []
             raise last_error
         return []
+
+    async def _list_products_endpoint(self, endpoint: str, *, user_required: bool) -> list[YClientsProduct]:
+        products: list[YClientsProduct] = []
+        seen_pages: set[tuple[str, ...]] = set()
+        seen_products: set[tuple[int, str, str]] = set()
+        count = 200
+        for page in range(1, 51):
+            try:
+                data = await self._request_products_page(
+                    endpoint,
+                    page=page,
+                    count=count,
+                    user_required=user_required,
+                )
+            except YClientsApiError:
+                if products:
+                    break
+                raise
+            items = self._as_list(self._unwrap_data(data))
+            page_signature = _products_page_signature(items)
+            if not items or page_signature in seen_pages:
+                break
+            seen_pages.add(page_signature)
+            for item in items:
+                product = _product_from_item(item)
+                if product is None:
+                    continue
+                product_key = _product_identity(product)
+                if product_key in seen_products:
+                    continue
+                seen_products.add(product_key)
+                products.append(product)
+            total_count = _extract_total_count(data)
+            if len(items) < 25 or (total_count is not None and len(products) >= total_count):
+                break
+        return products
+
+    async def _request_products_page(
+        self,
+        endpoint: str,
+        *,
+        page: int,
+        count: int,
+        user_required: bool,
+    ) -> dict[str, Any] | list[Any]:
+        last_error: YClientsApiError | None = None
+        for _ in range(2):
+            try:
+                return await self._request(
+                    "GET",
+                    endpoint,
+                    params={"page": page, "count": count},
+                    user_required=user_required,
+                )
+            except YClientsApiError as exc:
+                last_error = exc
+                if exc.status_code is not None and exc.status_code < 500:
+                    raise
+        raise last_error or YClientsApiError("YCLIENTS не вернул страницу товаров.")
 
     async def list_records(
         self,
@@ -366,6 +408,68 @@ def _records_page_signature(items: list[dict[str, Any]]) -> tuple[str, ...]:
         str(item.get("id") or item.get("record_id") or item.get("visit_id") or index)
         for index, item in enumerate(items)
     )
+
+
+def _products_page_signature(items: list[dict[str, Any]]) -> tuple[str, ...]:
+    return tuple(
+        str(item.get("id") or item.get("good_id") or item.get("product_id") or index)
+        for index, item in enumerate(items)
+    )
+
+
+def _product_from_item(item: dict[str, Any]) -> YClientsProduct | None:
+    product_id = item.get("id") or item.get("good_id") or item.get("product_id")
+    if product_id is None:
+        return None
+    return YClientsProduct(
+        id=_to_int(product_id),
+        title=str(item.get("title") or item.get("name") or item.get("label") or "Товар"),
+        price=_to_decimal(item.get("price") or item.get("cost") or 0),
+        stock_amount=_extract_product_stock(item),
+        category=_extract_product_category(item),
+    )
+
+
+def _product_identity(product: YClientsProduct) -> tuple[int, str, str]:
+    return (product.id, product.title.casefold(), str(product.price))
+
+
+def _extract_product_category(item: dict[str, Any]) -> str | None:
+    category = item.get("category")
+    if isinstance(category, dict):
+        title = category.get("title") or category.get("name")
+        return str(title) if title else None
+    if category:
+        return str(category)
+    for key in ("category_title", "group_title", "section_title"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _extract_product_stock(item: dict[str, Any]) -> Decimal:
+    for key in ("amount", "stock_amount", "quantity", "balance", "actual_amount", "actual_balance", "storage_amount"):
+        if item.get(key) is not None:
+            return _to_decimal(item.get(key))
+    for key in ("actual_amounts", "storage_amounts", "amounts"):
+        value = item.get(key)
+        if isinstance(value, list):
+            return sum(
+                (
+                    _to_decimal(
+                        entry.get("amount")
+                        or entry.get("quantity")
+                        or entry.get("balance")
+                        or entry.get("value")
+                        or 0
+                    )
+                    for entry in value
+                    if isinstance(entry, dict)
+                ),
+                Decimal("0"),
+            )
+    return Decimal("0")
 
 
 def _extract_category(item: dict[str, Any]) -> str | None:

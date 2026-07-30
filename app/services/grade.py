@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.settings import Settings
 from app.models import Employee, GradeRule
 from app.repositories import CompanyRepository, DailyStatisticRepository, GradeRuleRepository
-from app.services.statistics import StatisticsService, _date_range_label, money, yclients_data_error_hint
+from app.services.statistics import StatisticsService, _date_range_label, money
 from app.utils.exceptions import AppError
 from app.utils.telegram_formatting import blockquote, bold, pre, progress_bar as telegram_progress_bar
 
@@ -55,13 +55,12 @@ class GradeService:
             )
 
         grade_period_start, grade_period_end = _grade_period_bounds(next_rule.months_required)
-        refresh_warning: str | None = None
         try:
             await self._statistics.sync_employee_period(employee, grade_period_start, grade_period_end)
-        except AppError as exc:
-            refresh_warning = yclients_data_error_hint(exc.public_message)
-        except Exception as exc:
-            refresh_warning = yclients_data_error_hint(f"Не удалось обновить данные из YCLIENTS: {str(exc)[:200]}")
+        except AppError:
+            pass
+        except Exception:
+            pass
 
         progress = await self._calculate_progress(employee, next_rule, grade_period_start, grade_period_end)
         tenure_scope = _tenure_scope(next_rule)
@@ -81,8 +80,6 @@ class GradeService:
         ]
         if progress.tenure_months is None:
             digest.append("Дата начала работы/категории не заполнена, поэтому стаж сейчас не ограничивает прогресс.")
-        if refresh_warning:
-            digest.insert(0, f"ДАЙДЖЕСТ: свежие данные не подтянулись: {refresh_warning}")
         return "\n\n".join(
             [
                 bold("GRADE UP"),
