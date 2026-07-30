@@ -16,6 +16,11 @@ class AdminCompanySetupStates(StatesGroup):
     waiting_user_token = State()
 
 
+class AdminYClientsLoginStates(StatesGroup):
+    waiting_login = State()
+    waiting_password = State()
+
+
 class AdminBroadcastStates(StatesGroup):
     choosing_branch = State()
     choosing_action = State()

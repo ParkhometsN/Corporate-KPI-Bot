@@ -40,10 +40,19 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔑 Обновить YCLIENTS", callback_data="admin:setup_yclients")],
+            [InlineKeyboardButton(text="🔐 Войти в YCLIENTS", callback_data="admin:yclients_login")],
             [InlineKeyboardButton(text="👤 Обновить User token", callback_data="admin:setup_user_token")],
             [InlineKeyboardButton(text="📋 Регламент", callback_data="admin:regulation")],
             [InlineKeyboardButton(text="🧨 Сброс до регистрации", callback_data="admin:reset")],
             [InlineKeyboardButton(text="⬅ Назад", callback_data="admin:dashboard")],
+        ]
+    )
+
+
+def yclients_login_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin:yclients_login_cancel")],
         ]
     )
 

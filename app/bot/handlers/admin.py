@@ -27,6 +27,7 @@ from app.bot.keyboards.admin import (
     employee_admin_keyboard,
     employees_keyboard,
     team_stats_period_keyboard,
+    yclients_login_cancel_keyboard,
 )
 from app.bot.states.admin import (
     AdminAuthStates,
@@ -35,6 +36,7 @@ from app.bot.states.admin import (
     AdminCompanySetupStates,
     AdminKpiStates,
     AdminRegulationStates,
+    AdminYClientsLoginStates,
 )
 from app.services.factory import ServiceContainer
 from app.utils.exceptions import AppError
@@ -234,6 +236,138 @@ async def admin_setup_user_token(callback: CallbackQuery, state: FSMContext, ser
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin:yclients_login")
+async def admin_yclients_login_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    services: ServiceContainer,
+) -> None:
+    await _ensure_admin(callback, services)
+    if not await services.admin.is_yclients_configured():
+        await callback.message.edit_text(
+            "\n\n".join(
+                [
+                    bold("YCLIENTS НЕ НАСТРОЕН"),
+                    blockquote("Сначала сохраните API key и Partner ID. После этого бот попросит логин и пароль."),
+                ]
+            ),
+            reply_markup=admin_settings_keyboard(),
+        )
+        await callback.answer()
+        return
+    await state.clear()
+    await state.set_state(AdminYClientsLoginStates.waiting_login)
+    await callback.message.edit_text(
+        _yclients_login_prompt_text(),
+        reply_markup=yclients_login_cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:yclients_login_cancel")
+async def admin_yclients_login_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    services: ServiceContainer,
+) -> None:
+    await _ensure_admin(callback, services)
+    await state.clear()
+    await callback.message.edit_text(bold("НАСТРОЙКИ"), reply_markup=admin_settings_keyboard())
+    await callback.answer()
+
+
+@router.message(AdminYClientsLoginStates.waiting_login, F.text)
+async def admin_yclients_login_text(
+    message: Message,
+    state: FSMContext,
+    services: ServiceContainer,
+) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+    login = (message.text or "").strip()
+    if not login:
+        await message.answer("Введите телефон или email от аккаунта YCLIENTS.", reply_markup=yclients_login_cancel_keyboard())
+        return
+    await state.update_data(yclients_login=login)
+    await _try_delete(message)
+    await state.set_state(AdminYClientsLoginStates.waiting_password)
+    await message.answer(
+        "\n\n".join(
+            [
+                bold("ПАРОЛЬ YCLIENTS"),
+                blockquote(
+                    [
+                        "Отправьте пароль от аккаунта YCLIENTS следующим сообщением.",
+                        "Сообщение с паролем будет удалено. В базе сохранится только User token, который вернёт YCLIENTS.",
+                    ]
+                ),
+            ]
+        ),
+        reply_markup=yclients_login_cancel_keyboard(),
+    )
+
+
+@router.message(AdminYClientsLoginStates.waiting_password, F.text)
+async def admin_yclients_password_text(
+    message: Message,
+    state: FSMContext,
+    services: ServiceContainer,
+) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+    data = await state.get_data()
+    login = str(data.get("yclients_login") or "").strip()
+    password = message.text or ""
+    await _try_delete(message)
+    if not login:
+        await state.set_state(AdminYClientsLoginStates.waiting_login)
+        await message.answer(_yclients_login_prompt_text(), reply_markup=yclients_login_cancel_keyboard())
+        return
+    if not password:
+        await message.answer("Пароль не должен быть пустым.", reply_markup=yclients_login_cancel_keyboard())
+        return
+
+    async def connect_yclients():
+        await services.admin.setup_yclients_login_password(login=login, password=password)
+        await state.clear()
+        return (
+            "\n\n".join(
+                [
+                    bold("ВХОД В YCLIENTS ВЫПОЛНЕН"),
+                    blockquote(
+                        [
+                            "User token получен и сохранён.",
+                            "Статистика, записи, финансы и товары будут запрашиваться с правами этого аккаунта.",
+                        ]
+                    ),
+                    await services.admin.check_connection_text(),
+                ]
+            ),
+            admin_dashboard_keyboard(),
+        )
+
+    try:
+        await answer_with_loading(
+            message,
+            title="ВХОД В YCLIENTS",
+            detail="Получаю User token по логину и паролю.",
+            producer=connect_yclients,
+        )
+    except AppError as exc:
+        await message.answer(
+            "\n\n".join(
+                [
+                    bold("YCLIENTS НЕ ПРИНЯЛ ВХОД"),
+                    blockquote(
+                        [
+                            exc.public_message,
+                            "Проверьте логин, пароль, доступ к филиалам и двухэтапную аутентификацию.",
+                        ]
+                    ),
+                ]
+            ),
+            reply_markup=yclients_login_cancel_keyboard(),
+        )
+
+
 @router.callback_query(F.data == "admin:regulation")
 async def admin_regulation(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
@@ -419,19 +553,28 @@ async def setup_yclients_partner_id(
     except ValueError:
         await message.answer("Partner ID должен быть числом.")
         return
-    await state.update_data(partner_id=partner_id)
+    data = await state.get_data()
+    try:
+        company = await services.admin.setup_yclients(
+            api_key=data["api_key"],
+            partner_id=partner_id,
+            user_token=None,
+        )
+    except AppError as exc:
+        await message.answer(exc.public_message)
+        return
     await _try_delete(message)
-    await state.set_state(AdminCompanySetupStates.waiting_user_token)
+    await state.clear()
+    await state.set_state(AdminYClientsLoginStates.waiting_login)
     await message.answer(
         "\n\n".join(
             [
-                bold("USER TOKEN YCLIENTS"),
-                blockquote(
-                    "Введите User token для записей, статистики, финансов и товаров. "
-                    "Если токена пока нет, отправьте -"
-                ),
+                bold("YCLIENTS ОСНОВА СОХРАНЕНА"),
+                pre([f"Partner ID {company.partner_id}", "User token ❌ нужно получить"]),
+                _yclients_login_prompt_text(),
             ]
-        )
+        ),
+        reply_markup=yclients_login_cancel_keyboard(),
     )
 
 
@@ -1046,6 +1189,21 @@ def _optional_token(text: str | None) -> str | None:
     if value.casefold() in {"", "-", "нет", "no", "skip", "пропустить"}:
         return None
     return value
+
+
+def _yclients_login_prompt_text() -> str:
+    return "\n\n".join(
+        [
+            bold("ВХОД В YCLIENTS"),
+            blockquote(
+                [
+                    "Введите телефон или email от аккаунта YCLIENTS.",
+                    "Телефон лучше указывать с кодом страны, например 7XXXXXXXXXX.",
+                    "После этого бот попросит пароль, получит User token и сохранит только токен.",
+                ]
+            ),
+        ]
+    )
 
 
 def _regulation_message_html(message: Message) -> str:

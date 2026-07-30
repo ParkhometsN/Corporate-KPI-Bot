@@ -200,13 +200,25 @@ class AdminService:
         await self._session.flush()
         return company
 
-    async def setup_yclients_user_token(self, user_token: str | None) -> Company:
+    async def setup_yclients_user_token(self, user_token: str | None, *, validate_manual: bool = True) -> Company:
         company = await self._require_company()
-        if user_token and len(user_token.strip()) < 20:
+        cleaned_user_token = user_token.strip() if user_token else None
+        if cleaned_user_token and validate_manual and len(cleaned_user_token) < 20:
             raise ValidationError("User token выглядит слишком коротким. Вставьте полный токен из YCLIENTS.")
-        encrypted_user_token = self._encryption.encrypt(user_token) if user_token else None
+        encrypted_user_token = self._encryption.encrypt(cleaned_user_token) if cleaned_user_token else None
         await self._companies.update_yclients_user_token(company, encrypted_user_token)
         return company
+
+    async def setup_yclients_login_password(self, *, login: str, password: str) -> Company:
+        company = await self._require_company()
+        if not self._company_has_yclients_credentials(company):
+            raise EntityNotFoundError("Сначала укажите YCLIENTS API key и Partner ID.")
+        if not login.strip():
+            raise ValidationError("Введите телефон или email от аккаунта YCLIENTS.")
+        if not password:
+            raise ValidationError("Введите пароль от аккаунта YCLIENTS.")
+        user_token = await self._client_for_company(company).authenticate_user(login, password)
+        return await self.setup_yclients_user_token(user_token, validate_manual=False)
 
     async def regulation_text(self, *, for_admin: bool = False) -> str:
         company = await self._require_company()

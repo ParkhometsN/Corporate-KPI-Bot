@@ -49,6 +49,19 @@ class YClientsClient:
         await self.get_company(company_id)
         return True
 
+    async def authenticate_user(self, login: str, password: str) -> str:
+        if not login.strip() or not password:
+            raise ConfigurationError("Введите логин и пароль YCLIENTS.")
+        payload = await self._request(
+            "POST",
+            "auth",
+            json={"login": login.strip(), "password": password},
+        )
+        user_token = _extract_user_token(payload)
+        if user_token:
+            return user_token
+        raise YClientsApiError(_auth_token_missing_message(payload))
+
     async def get_company(self, company_id: int) -> YClientsBranch:
         data = await self._request("GET", f"company/{company_id}")
         payload = self._unwrap_data(data)
@@ -256,6 +269,50 @@ def _flatten_services(value: Any) -> list[dict[str, Any]]:
             if nested is not None:
                 return _flatten_services(nested)
     return []
+
+
+def _extract_user_token(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("user_token", "token", "access_token"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("data", "user", "result"):
+        nested = payload.get(key)
+        token = _extract_user_token(nested)
+        if token:
+            return token
+    return None
+
+
+def _auth_token_missing_message(payload: Any) -> str:
+    message = _extract_payload_message(payload)
+    hint = (
+        "YCLIENTS принял логин и пароль, но не вернул User token. "
+        "Если у аккаунта включена двухэтапная аутентификация, используйте ручной User token "
+        "или временно отключите 2FA для получения токена."
+    )
+    return f"{hint} Ответ YCLIENTS: {message[:200]}" if message else hint
+
+
+def _extract_payload_message(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    meta = payload.get("meta")
+    if isinstance(meta, dict):
+        meta_message = meta.get("message")
+        if meta_message:
+            return str(meta_message)
+    for key in ("message", "error", "error_description"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    for key in ("data", "user", "result"):
+        message = _extract_payload_message(payload.get(key))
+        if message:
+            return message
+    return None
 
 
 def _extract_category(item: dict[str, Any]) -> str | None:

@@ -5,7 +5,7 @@ from app.services.grade import progress_bar
 from app.services.kpi import _next_month
 from app.services.catalog import _normalize_title
 from app.services.statistics import _period_bounds
-from app.yclients.client import _calculate_daily_statistic
+from app.yclients.client import _calculate_daily_statistic, _extract_user_token
 
 
 def test_next_month_regular_and_year_boundary() -> None:
@@ -59,3 +59,9 @@ def test_yclients_daily_statistic_calculation() -> None:
     assert stat.products_revenue == Decimal("700")
     assert stat.total_revenue == Decimal("4700")
     assert stat.products_sold == 1
+
+
+def test_extract_user_token_from_auth_payload_variants() -> None:
+    assert _extract_user_token({"user_token": "abc"}) == "abc"
+    assert _extract_user_token({"success": True, "data": {"user_token": "def"}}) == "def"
+    assert _extract_user_token({"success": True, "data": {}}) is None
