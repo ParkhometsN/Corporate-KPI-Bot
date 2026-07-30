@@ -10,7 +10,7 @@ from app.models import Branch, Employee
 from app.repositories import CompanyRepository, DailyStatisticRepository, KpiRuleRepository
 from app.services.security import EncryptionService
 from app.utils.exceptions import AppError
-from app.utils.telegram_formatting import blockquote, bold, money as format_money, pre, progress_bar
+from app.utils.telegram_formatting import blockquote, bold, money as format_money, pre, progress_bar, shorten
 from app.yclients.client import (
     YClientsApiError,
     YClientsClient,
@@ -180,7 +180,8 @@ class StatisticsService:
         products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
         total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
         average_check = total_revenue / haircuts_count if haircuts_count else Decimal("0")
-        kpi_base = service_revenue + additional_services_revenue
+        service_income = service_revenue + additional_services_revenue
+        kpi_base = additional_services_revenue + products_revenue
         goal_amount = await self._next_kpi_goal(kpi_base)
         goal_progress = (
             min(Decimal("100"), kpi_base / goal_amount * Decimal("100"))
@@ -197,7 +198,7 @@ class StatisticsService:
         ]
         metrics = [
             f"Стрижек             {haircuts_count}",
-            f"Доход услуг         {money(kpi_base)}",
+            f"Доход услуг         {money(service_income)}",
             f"Основные услуги     {money(service_revenue)}",
             f"Доп. услуги         {money(additional_services_revenue)}",
             f"Общая выручка       {money(total_revenue)}",
@@ -284,9 +285,10 @@ class StatisticsService:
                 additional_services_revenue = sum(
                     (item.additional_services_revenue for item in stats), Decimal("0")
                 )
-                products_sold = sum(item.products_sold for item in stats)
-                products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
-                total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
+            products_sold = sum(item.products_sold for item in stats)
+            products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
+            total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
+            average_check = total_revenue / haircuts_count if haircuts_count else Decimal("0")
             rows.append(
                 {
                     "employee": employee,
@@ -297,7 +299,8 @@ class StatisticsService:
                     "products_sold": products_sold,
                     "products_revenue": products_revenue,
                     "total_revenue": total_revenue,
-                    "kpi_base": service_revenue + additional_services_revenue,
+                    "average_check": average_check,
+                    "kpi_base": additional_services_revenue + products_revenue,
                     "stats_count": len(stats),
                 }
             )
@@ -309,7 +312,8 @@ class StatisticsService:
         products_revenue = sum((row["products_revenue"] for row in rows), Decimal("0"))
         total_revenue = sum((row["total_revenue"] for row in rows), Decimal("0"))
         average_check = total_revenue / total_haircuts if total_haircuts else Decimal("0")
-        kpi_base = service_revenue + additional_services_revenue
+        service_income = service_revenue + additional_services_revenue
+        kpi_base = additional_services_revenue + products_revenue
         unavailable_rows = [row for row in rows if row["data_unavailable"]]
         available_rows_count = len(rows) - len(unavailable_rows)
 
@@ -320,7 +324,7 @@ class StatisticsService:
             f"Сотрудников {len(employees)}",
             *([f"Данные API  {available_rows_count} из {len(employees)}"] if unavailable_rows else []),
             f"Стрижек     {total_haircuts}",
-            f"Доход услуг {money(kpi_base)}",
+            f"Доход услуг {money(service_income)}",
             f"Основные    {money(service_revenue)}",
             f"Доп. услуги {money(additional_services_revenue)}",
             f"KPI база    {money(kpi_base)}",
@@ -328,15 +332,21 @@ class StatisticsService:
             f"Выручка     {money(total_revenue)}",
             f"Средний чек {money(average_check)}",
         ]
-        table = [f"{'Сотрудник':18} {'Стр':>3} {'Выручка':>11} {'KPI':>11}"]
+        table = [f"{'Филиал':11} {'Сотрудник':16} {'Стр':>3} {'Ср.чек':>8} {'Выручка':>11} {'KPI база':>11}"]
         for row in sorted(rows, key=lambda item: item["total_revenue"], reverse=True):
             employee = row["employee"]
+            branch_name = _branch_table_label(employee)
             if row["data_unavailable"]:
-                table.append(f"{employee.full_name[:18]:18} {'-':>3} {'нет API':>11} {'-':>11}")
+                table.append(
+                    f"{branch_name:11} {shorten(employee.full_name, 16):16} "
+                    f"{'-':>3} {'-':>8} {'нет API':>11} {'-':>11}"
+                )
             else:
                 table.append(
-                    f"{employee.full_name[:18]:18} "
+                    f"{branch_name:11} "
+                    f"{shorten(employee.full_name, 16):16} "
                     f"{row['haircuts_count']:>3} "
+                    f"{money(row['average_check']):>8} "
                     f"{money(row['total_revenue']):>11} "
                     f"{money(row['kpi_base']):>11}"
                 )
@@ -516,6 +526,13 @@ def _employees_by_branch(employees: list[Employee]) -> list[tuple[Branch, list[E
             by_branch[branch_key] = (employee.branch, [])
         by_branch[branch_key][1].append(employee)
     return list(by_branch.values())
+
+
+def _branch_table_label(employee: Employee) -> str:
+    if employee.branch is None:
+        return "-"
+    name = employee.branch.name.replace("KREMEN", "").strip(" ·-")
+    return shorten(name or employee.branch.name, 11)
 
 
 def _records_summary_lines(remote_stats: list[YClientsDailyStatistic]) -> list[str]:

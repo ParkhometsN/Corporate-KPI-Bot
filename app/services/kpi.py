@@ -31,11 +31,8 @@ class KpiService:
         month = month.replace(day=1)
         monthly_stat = await self._monthly_stats.upsert_from_daily(employee.id, month)
         rules = await self._kpi_rules.list_active(company.id)
-        kpi_base = monthly_stat.service_revenue + monthly_stat.additional_services_revenue
-        earned_percent = Decimal("0")
-        for rule in rules:
-            if kpi_base >= rule.threshold_amount:
-                earned_percent = rule.percent
+        kpi_base = _kpi_bonus_base(monthly_stat)
+        earned_percent = _earned_percent_from_rules(rules, kpi_base)
         applies_from_month = _next_month(month)
         entity = await self._employee_kpi.get_for_employee(employee.id, month)
         if entity is None:
@@ -75,6 +72,7 @@ class KpiService:
             )
         monthly_stat = await self._monthly_stats.get_for_employee(employee.id, month)
         goal_amount = await self._next_kpi_goal(entity.kpi_base_amount)
+        goal_percent = await self._kpi_goal_percent(goal_amount)
         goal_progress = (
             min(Decimal("100"), entity.kpi_base_amount / goal_amount * Decimal("100"))
             if goal_amount and goal_amount > 0
@@ -90,12 +88,15 @@ class KpiService:
             *_month_period_lines(entity.month),
             f"Сотрудник   {employee.full_name}",
             f"Грейд       {employee.category_title or 'не указан'}",
-            f"База KPI    {money(entity.kpi_base_amount)}",
-            f"Процент     {entity.earned_percent.quantize(Decimal('0.01'))}%",
+            f"Основные    {money(entity.service_revenue)}",
+            f"Доп. услуги {money(entity.additional_services_revenue)}",
+            f"Товары      {monthly_stat.products_sold if monthly_stat else 0} / {money(monthly_stat.products_revenue if monthly_stat else Decimal('0'))}",
+            f"KPI база    {money(entity.kpi_base_amount)}",
+            f"Бонус       +{entity.earned_percent.quantize(Decimal('0.01'))}%",
             f"Применится  {entity.applies_from_month:%m.%Y}",
         ]
         progress = [
-            f"Цель        {money(goal_amount) if goal_amount else 'не задана'}",
+            f"Цель        {_kpi_goal_line(goal_amount, goal_percent)}",
             f"До цели     {money(amount_left) if amount_left is not None else 'не задано'}",
             f"Прогресс    {progress_bar(goal_progress)} {goal_progress:.0f}%",
         ]
@@ -147,17 +148,18 @@ class KpiService:
             total_base += entity.kpi_base_amount
             rows.append((employee, entity))
 
-        table = [f"{'Сотрудник':18} {'KPI база':>11} {'%':>6} {'с':>7}"]
+        table = [f"{'Сотрудник':18} {'KPI база':>11} {'Бонус':>7} {'с':>7}"]
         for employee, entity in sorted(rows, key=lambda item: item[1].kpi_base_amount, reverse=True):
             table.append(
                 f"{employee.full_name[:18]:18} "
                 f"{money(entity.kpi_base_amount):>11} "
-                f"{entity.earned_percent.quantize(Decimal('0.01')):>6}% "
+                f"+{entity.earned_percent.quantize(Decimal('0.01')):>5}% "
                 f"{entity.applies_from_month:%m.%Y}"
             )
 
         digest = [
-            "KPI база считается как услуги + дополнительные услуги. Товары в KPI сейчас не входят.",
+            "KPI база считается как дополнительные услуги + товары.",
+            "Порог 37 000 ₽ даёт +2%, порог 60 000 ₽ даёт +5% к проценту от услуг.",
             "Процент применяется со следующего месяца после закрытия текущего.",
         ]
         if first_refresh_warning:
@@ -193,6 +195,17 @@ class KpiService:
                 return threshold
         return paid_thresholds[-1]
 
+    async def _kpi_goal_percent(self, goal_amount: Decimal | None) -> Decimal | None:
+        if goal_amount is None:
+            return None
+        company = await self._companies.get_default()
+        if company is None:
+            return None
+        for rule in await self._kpi_rules.list_active(company.id):
+            if rule.threshold_amount == goal_amount:
+                return rule.percent
+        return None
+
 
 def _next_month(month: date) -> date:
     if month.month == 12:
@@ -218,6 +231,26 @@ def _date_range_label(start: date, end: date) -> str:
     return f"{start:%d.%m.%Y}-{end:%d.%m.%Y}"
 
 
+def _kpi_bonus_base(monthly_stat) -> Decimal:
+    return monthly_stat.additional_services_revenue + monthly_stat.products_revenue
+
+
+def _earned_percent_from_rules(rules, kpi_base: Decimal) -> Decimal:
+    earned_percent = Decimal("0")
+    for rule in rules:
+        if kpi_base >= rule.threshold_amount:
+            earned_percent = rule.percent
+    return earned_percent
+
+
+def _kpi_goal_line(goal_amount: Decimal | None, goal_percent: Decimal | None) -> str:
+    if goal_amount is None:
+        return "не задана"
+    if goal_percent is None:
+        return money(goal_amount)
+    return f"{money(goal_amount)} для +{goal_percent.quantize(Decimal('0.01'))}%"
+
+
 def _kpi_digest(
     *,
     entity: EmployeeKpi,
@@ -225,7 +258,8 @@ def _kpi_digest(
     refresh_warning: str | None,
 ) -> list[str]:
     digest = [
-        "KPI база считается как услуги + дополнительные услуги. Товары в KPI сейчас не входят.",
+        "KPI база считается как дополнительные услуги + товары.",
+        "Порог 37 000 ₽ даёт +2%, порог 60 000 ₽ даёт +5% к проценту от услуг.",
         "Процент не применяется сразу: он переносится на следующий месяц после закрытия текущего.",
     ]
     if refresh_warning:
@@ -234,5 +268,5 @@ def _kpi_digest(
         if daily_rows == 0:
             digest.insert(0, "ДАЙДЖЕСТ KPI: за месяц нет посещений в дневной статистике.")
         else:
-            digest.insert(0, "ДАЙДЖЕСТ KPI: записи есть, но сумма услуг и доп. услуг равна 0 ₽.")
+            digest.insert(0, "ДАЙДЖЕСТ KPI: записи есть, но сумма доп. услуг и товаров равна 0 ₽.")
     return digest

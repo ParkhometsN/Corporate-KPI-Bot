@@ -1,8 +1,9 @@
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
-from app.services.grade import progress_bar
-from app.services.kpi import _next_month
+from app.services.grade import _find_current_and_next, _grade_period_bounds, progress_bar
+from app.services.kpi import _earned_percent_from_rules, _kpi_bonus_base, _next_month
 from app.services.catalog import _normalize_title
 from app.services.statistics import _period_bounds
 from app.yclients.client import _calculate_daily_statistic, _extract_user_token, _record_statistic_date
@@ -26,6 +27,43 @@ def test_progress_bar() -> None:
     assert progress_bar(Decimal("0")) == "░░░░░░░░░░"
     assert progress_bar(Decimal("50")) == "█████░░░░░"
     assert progress_bar(Decimal("100")) == "██████████"
+
+
+def test_grade_current_category_aliases_match_price_rules() -> None:
+    rules = [
+        SimpleNamespace(category_title="1500 ₽", base_price=Decimal("1500")),
+        SimpleNamespace(category_title="1700 ₽", base_price=Decimal("1700")),
+    ]
+
+    current, next_rule = _find_current_and_next(rules, "Мастер")
+
+    assert current.base_price == Decimal("1500")
+    assert next_rule.base_price == Decimal("1700")
+
+
+def test_grade_period_includes_current_month() -> None:
+    start, end = _grade_period_bounds(2)
+
+    assert start.day == 1
+    assert end == date.today()
+    assert (end.year - start.year) * 12 + end.month - start.month == 1
+
+
+def test_kpi_bonus_base_uses_additional_services_and_products() -> None:
+    monthly_stat = SimpleNamespace(
+        additional_services_revenue=Decimal("25000"),
+        products_revenue=Decimal("12000"),
+    )
+    rules = [
+        SimpleNamespace(threshold_amount=Decimal("0"), percent=Decimal("0")),
+        SimpleNamespace(threshold_amount=Decimal("37000"), percent=Decimal("2")),
+        SimpleNamespace(threshold_amount=Decimal("60000"), percent=Decimal("5")),
+    ]
+
+    kpi_base = _kpi_bonus_base(monthly_stat)
+
+    assert kpi_base == Decimal("37000")
+    assert _earned_percent_from_rules(rules, kpi_base) == Decimal("2")
 
 
 def test_service_title_normalization_groups_minor_variants() -> None:
