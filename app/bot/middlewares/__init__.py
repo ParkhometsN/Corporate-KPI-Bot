@@ -1,0 +1,2 @@
+"""Middleware Telegram-бота."""
+
