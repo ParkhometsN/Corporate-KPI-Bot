@@ -235,3 +235,8 @@ def test_employee_settings_button_text_normalization() -> None:
     assert _normalize_button_text("Настройки") == "настройки"
     assert _normalize_button_text("⚙ Настройки") == "настройки"
     assert _normalize_button_text("⚙️ Настройки") == "настройки"
+    assert _normalize_button_text("📊 Статистика") == "статистика"
+    assert _normalize_button_text("🎯 KPI") == "kpi"
+    assert _normalize_button_text("📈 Grade Up") == "grade up"
+    assert _normalize_button_text("💇 Услуги") == "услуги"
+    assert _normalize_button_text("🧴 Товары") == "товары"

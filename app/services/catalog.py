@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from decimal import Decimal
 import re
+from time import monotonic
 
 from aiogram.types import (
     InputRichBlockParagraph,
@@ -33,6 +34,7 @@ PRODUCT_CATEGORY_PRIORITY = (
     "graham hill",
     "rebel",
 )
+_PRODUCTS_CACHE: dict[int, tuple[float, list[YClientsProduct]]] = {}
 
 
 class CatalogService:
@@ -153,8 +155,14 @@ class CatalogService:
             return []
         if employee.branch is None:
             return []
+        branch_id = employee.branch.yclients_branch_id
+        cached_products = _cached_products(branch_id, ttl_seconds=self._settings.yclients_catalog_cache_ttl_seconds)
+        if cached_products is not None:
+            return cached_products
         client = self._client_for_company(company)
-        return await client.list_products(employee.branch.yclients_branch_id)
+        products = await client.list_products(branch_id)
+        _PRODUCTS_CACHE[branch_id] = (monotonic(), products)
+        return products
 
     def _client_for_company(self, company: Company) -> YClientsClient:
         partner_token = self._encryption.decrypt(company.encrypted_yclients_api_key)
@@ -164,6 +172,7 @@ class CatalogService:
             partner_token=partner_token or self._settings.yclients_partner_token,
             user_token=user_token,
             timeout_seconds=self._settings.yclients_timeout_seconds,
+            product_max_pages=self._settings.yclients_product_max_pages,
         )
 
 
@@ -364,3 +373,16 @@ def _product_category_rank(product: YClientsProduct) -> int:
 def _is_certificate_product(product: YClientsProduct) -> bool:
     text = f"{product.title} {product.category or ''}".casefold()
     return any(marker in text for marker in ("сертификат", "абонемент"))
+
+
+def _cached_products(branch_id: int, *, ttl_seconds: int) -> list[YClientsProduct] | None:
+    if ttl_seconds <= 0:
+        return None
+    cached = _PRODUCTS_CACHE.get(branch_id)
+    if cached is None:
+        return None
+    cached_at, products = cached
+    if monotonic() - cached_at > ttl_seconds:
+        _PRODUCTS_CACHE.pop(branch_id, None)
+        return None
+    return products

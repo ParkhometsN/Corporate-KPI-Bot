@@ -413,6 +413,7 @@ class AdminService:
             partner_token=partner_token or self._settings.yclients_partner_token,
             user_token=self._company_user_token(company),
             timeout_seconds=self._settings.yclients_timeout_seconds,
+            product_max_pages=self._settings.yclients_product_max_pages,
         )
 
     def _company_user_token(self, company: Company) -> str | None:

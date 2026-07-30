@@ -20,6 +20,10 @@ def _normalize_button_text(value: str | None) -> str:
         .replace("⚙", "")
         .replace("📋", "")
         .replace("🧴", "")
+        .replace("📊", "")
+        .replace("🎯", "")
+        .replace("📈", "")
+        .replace("💇", "")
         .strip()
     )
 
@@ -33,7 +37,7 @@ def _button_text_is(*values: str):
     return check
 
 
-@router.message(F.text.in_({"Статистика", "📊 Статистика"}))
+@router.message(_button_text_is("Статистика", "📊 Статистика"))
 async def employee_statistics(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
     await answer_with_loading(
@@ -62,7 +66,7 @@ async def employee_statistics_period(callback: CallbackQuery, services: ServiceC
     )
 
 
-@router.message(F.text.in_({"KPI", "🎯 KPI"}))
+@router.message(_button_text_is("KPI", "🎯 KPI"))
 async def employee_kpi(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
     await answer_with_loading(
@@ -73,7 +77,7 @@ async def employee_kpi(message: Message, services: ServiceContainer) -> None:
     )
 
 
-@router.message(F.text.in_({"Grade Up", "📈 Grade Up"}))
+@router.message(_button_text_is("Grade Up", "📈 Grade Up"))
 async def employee_grade(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
     await answer_with_loading(
@@ -84,7 +88,7 @@ async def employee_grade(message: Message, services: ServiceContainer) -> None:
     )
 
 
-@router.message(F.text.in_({"Услуги", "💇 Услуги"}))
+@router.message(_button_text_is("Услуги", "💇 Услуги"))
 async def employee_services(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
 
@@ -102,7 +106,7 @@ async def employee_services(message: Message, services: ServiceContainer) -> Non
     )
 
 
-@router.message(F.text.in_({"Товары", "🧴 Товары"}))
+@router.message(_button_text_is("Товары", "🧴 Товары"))
 async def employee_products(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
 

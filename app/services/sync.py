@@ -92,4 +92,5 @@ class SyncService:
             partner_token=partner_token or self._settings.yclients_partner_token,
             user_token=user_token,
             timeout_seconds=self._settings.yclients_timeout_seconds,
+            product_max_pages=self._settings.yclients_product_max_pages,
         )

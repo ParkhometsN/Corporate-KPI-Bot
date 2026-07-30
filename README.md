@@ -30,6 +30,23 @@ python -m app.main
 Adminer будет доступен на `http://localhost:8081`.
 Внутренний API и Swagger будут доступны на `http://localhost:8080/docs`.
 
+## Запуск на сервере
+
+Для production используйте отдельный compose-файл без dev-монтажа исходников:
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Adminer в production не запускается по умолчанию. Если он нужен временно:
+
+```bash
+docker compose -f docker-compose.prod.yml --profile tools up -d adminer
+```
+
+Внутренний API в production привязан к `127.0.0.1:${INTERNAL_API_PORT:-8080}`. Если API нужен снаружи, ставьте reverse proxy с TLS.
+
 ## Переменные окружения
 
 Файл `.env` уже создан локально и добавлен в `.gitignore`. Для переноса на сервер используйте `.env.example` как шаблон.
@@ -46,6 +63,9 @@ Adminer будет доступен на `http://localhost:8081`.
 - `YCLIENTS_USER_TOKEN` — User token системного пользователя YCLIENTS. Нужен для закрытых методов, включая записи/статистику/товары, если права API требуют User token.
 - `YCLIENTS_PARTNER_ID` — ID партнёра.
 - `YCLIENTS_DEFAULT_COMPANY_ID` — ID филиала/компании YCLIENTS по умолчанию.
+- `YCLIENTS_CATALOG_CACHE_TTL_SECONDS` — кэш товаров YCLIENTS, по умолчанию 300 секунд.
+- `YCLIENTS_STATISTICS_CACHE_TTL_SECONDS` — кэш обновления статистики YCLIENTS, по умолчанию 300 секунд.
+- `YCLIENTS_PRODUCT_MAX_PAGES` — максимум страниц товаров YCLIENTS. По умолчанию 8 страниц, то есть до 200 товаров при странице 25 позиций.
 
 ## Сценарии Telegram
 
@@ -122,7 +142,7 @@ curl -X POST http://localhost:8080/api/branches/sync \
 База KPI считается как:
 
 ```text
-выручка по услугам + выручка по дополнительным услугам
+выручка по дополнительным услугам + выручка по товарам
 ```
 
 Процент не применяется сразу. Он автоматически начинает применяться со следующего месяца после закрытия текущего.

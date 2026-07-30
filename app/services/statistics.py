@@ -1,6 +1,7 @@
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
+from time import monotonic
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,7 @@ from app.yclients.client import (
 from app.yclients.types import YClientsDailyStatistic
 
 logger = get_logger(__name__)
+_REFRESH_CACHE: dict[tuple[str, str, str, date, date], float] = {}
 
 
 class StatisticsService:
@@ -134,8 +136,13 @@ class StatisticsService:
 
     async def refresh_period(self, employee: Employee, period: str) -> list[YClientsDailyStatistic]:
         start, end = _period_bounds(period)
+        cache_key = ("employee", str(employee.id), period, start, end)
+        if _is_refresh_cached(cache_key, ttl_seconds=self._settings.yclients_statistics_cache_ttl_seconds):
+            return []
         if employee.branch is not None:
-            return await self.sync_employee_period(employee, start, end)
+            remote_stats = await self.sync_employee_period(employee, start, end)
+            _mark_refresh_cached(cache_key)
+            return remote_stats
         day = start
         remote_stats: list[YClientsDailyStatistic] = []
         while day <= end:
@@ -143,6 +150,7 @@ class StatisticsService:
             if remote_stat is not None:
                 remote_stats.append(remote_stat)
             day += timedelta(days=1)
+        _mark_refresh_cached(cache_key)
         return remote_stats
 
     async def refresh_team_period(self, employees: list[Employee], period: str) -> list[YClientsDailyStatistic]:
@@ -150,7 +158,11 @@ class StatisticsService:
         remote_stats: list[YClientsDailyStatistic] = []
         grouped = _employees_by_branch(employees)
         for branch, branch_employees in grouped:
+            cache_key = ("branch", str(branch.id), period, start, end)
+            if _is_refresh_cached(cache_key, ttl_seconds=self._settings.yclients_statistics_cache_ttl_seconds):
+                continue
             remote_stats.extend(await self.sync_branch_period(branch, branch_employees, start, end))
+            _mark_refresh_cached(cache_key)
         return remote_stats
 
     async def employee_stats_text(self, employee: Employee, period: str = "month", *, refresh: bool = True) -> str:
@@ -357,6 +369,7 @@ class StatisticsService:
             user_token=self._encryption.decrypt(company.encrypted_yclients_user_token)
             or self._settings.yclients_user_token,
             timeout_seconds=self._settings.yclients_timeout_seconds,
+            product_max_pages=self._settings.yclients_product_max_pages,
         )
 
     async def _upsert_daily_stat(self, employee: Employee, remote_stat: YClientsDailyStatistic) -> None:
@@ -581,3 +594,23 @@ def _decimal(value) -> Decimal:
         return Decimal(str(value or 0))
     except Exception:
         return Decimal("0")
+
+
+def _is_refresh_cached(
+    cache_key: tuple[str, str, str, date, date],
+    *,
+    ttl_seconds: int,
+) -> bool:
+    if ttl_seconds <= 0:
+        return False
+    cached_at = _REFRESH_CACHE.get(cache_key)
+    if cached_at is None:
+        return False
+    if monotonic() - cached_at > ttl_seconds:
+        _REFRESH_CACHE.pop(cache_key, None)
+        return False
+    return True
+
+
+def _mark_refresh_cached(cache_key: tuple[str, str, str, date, date]) -> None:
+    _REFRESH_CACHE[cache_key] = monotonic()

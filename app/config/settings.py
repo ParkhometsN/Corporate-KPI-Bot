@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     yclients_partner_id: int
     yclients_default_company_id: int
     yclients_timeout_seconds: int = 30
+    yclients_catalog_cache_ttl_seconds: int = 300
+    yclients_statistics_cache_ttl_seconds: int = 300
+    yclients_product_max_pages: int = 8
 
     default_company_title: str = "Барбершоп"
     low_stock_threshold: int = 3
@@ -75,4 +78,3 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
-

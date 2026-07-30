@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+import asyncio
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -15,6 +16,8 @@ from app.yclients.types import (
     YClientsService,
 )
 
+PRODUCT_PAGE_BATCH_SIZE = 8
+
 
 class YClientsApiError(YClientsError):
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
@@ -30,11 +33,13 @@ class YClientsClient:
         partner_token: str,
         user_token: str | None,
         timeout_seconds: int,
+        product_max_pages: int = 8,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._partner_token = partner_token
         self._user_token = user_token
         self._timeout = httpx.Timeout(timeout_seconds)
+        self._product_max_pages = max(1, product_max_pages)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "YClientsClient":
@@ -43,6 +48,7 @@ class YClientsClient:
             partner_token=settings.yclients_partner_token,
             user_token=settings.yclients_user_token,
             timeout_seconds=settings.yclients_timeout_seconds,
+            product_max_pages=settings.yclients_product_max_pages,
         )
 
     async def validate_connection(self, company_id: int) -> bool:
@@ -152,35 +158,55 @@ class YClientsClient:
         seen_pages: set[tuple[str, ...]] = set()
         seen_products: set[tuple[int, str, str]] = set()
         count = 200
-        for page in range(1, 51):
-            try:
-                data = await self._request_products_page(
-                    endpoint,
-                    page=page,
-                    count=count,
-                    user_required=user_required,
-                )
-            except YClientsApiError:
-                if products:
+        page = 1
+        while page <= self._product_max_pages:
+            batch_pages = tuple(range(page, min(page + PRODUCT_PAGE_BATCH_SIZE, self._product_max_pages + 1)))
+            pages = await asyncio.gather(
+                *(
+                    self._request_products_page(
+                        endpoint,
+                        page=batch_page,
+                        count=count,
+                        user_required=user_required,
+                    )
+                    for batch_page in batch_pages
+                ),
+                return_exceptions=True,
+            )
+            should_stop = False
+            for data in pages:
+                if isinstance(data, YClientsApiError):
+                    if products:
+                        should_stop = True
+                        break
+                    raise data
+                if isinstance(data, Exception):
+                    if products:
+                        should_stop = True
+                        break
+                    raise YClientsApiError(f"YCLIENTS не вернул страницу товаров: {data}") from data
+                items = self._as_list(self._unwrap_data(data))
+                page_signature = _products_page_signature(items)
+                if not items or page_signature in seen_pages:
+                    should_stop = True
                     break
-                raise
-            items = self._as_list(self._unwrap_data(data))
-            page_signature = _products_page_signature(items)
-            if not items or page_signature in seen_pages:
+                seen_pages.add(page_signature)
+                for item in items:
+                    product = _product_from_item(item)
+                    if product is None:
+                        continue
+                    product_key = _product_identity(product)
+                    if product_key in seen_products:
+                        continue
+                    seen_products.add(product_key)
+                    products.append(product)
+                total_count = _extract_total_count(data)
+                if len(items) < 25 or (total_count is not None and len(products) >= total_count):
+                    should_stop = True
+                    break
+            if should_stop:
                 break
-            seen_pages.add(page_signature)
-            for item in items:
-                product = _product_from_item(item)
-                if product is None:
-                    continue
-                product_key = _product_identity(product)
-                if product_key in seen_products:
-                    continue
-                seen_products.add(product_key)
-                products.append(product)
-            total_count = _extract_total_count(data)
-            if len(items) < 25 or (total_count is not None and len(products) >= total_count):
-                break
+            page += PRODUCT_PAGE_BATCH_SIZE
         return products
 
     async def _request_products_page(
