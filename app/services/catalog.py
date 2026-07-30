@@ -112,6 +112,9 @@ class CatalogService:
         )
 
     async def products_text(self, employee: Employee, query: str | None = None) -> str:
+        return (await self.products_messages(employee, query=query))[0]
+
+    async def products_messages(self, employee: Employee, query: str | None = None) -> list[str]:
         products: list[YClientsProduct] = []
         try:
             products = await self._products_from_api(employee)
@@ -119,34 +122,30 @@ class CatalogService:
             products = []
         if query:
             products = [product for product in products if query.casefold() in product.title.casefold()]
+        products = _visible_products(products)
         if not products:
-            return "\n\n".join(
-                [
-                    bold("ТОВАРЫ"),
-                    blockquote("Товары пока не найдены. Проверьте выбранный филиал в панели руководителя."),
-                ]
-            )
+            return [
+                "\n\n".join(
+                    [
+                        bold("ТОВАРЫ"),
+                        blockquote("Товаров в наличии пока не найдено."),
+                    ]
+                )
+            ]
 
         products = sorted(products, key=_product_sort_key)
-        lines, hidden_count = _product_catalog_lines(products, max_chars=PRODUCTS_BODY_LIMIT)
-        summary = [
-            f"Филиал      {employee.branch.name if employee.branch else 'не указан'}",
-            f"Позиций     {len(products)}",
-            f"Показано    {len(products) - hidden_count}",
+        chunks = _product_catalog_chunks(products, max_chars=PRODUCTS_BODY_LIMIT)
+        return [
+            _product_message(
+                employee=employee,
+                lines=lines,
+                products_count=len(products),
+                part_number=index + 1,
+                parts_count=len(chunks),
+                query=query,
+            )
+            for index, lines in enumerate(chunks)
         ]
-        if query:
-            summary.append(f"Фильтр      {query}")
-        comment = ["Складские товары показаны выше сертификатов и абонементов."]
-        if hidden_count:
-            comment.append(f"Не поместилось товаров: {hidden_count}.")
-        return "\n\n".join(
-            [
-                bold("ТОВАРЫ"),
-                pre(summary),
-                pre(lines),
-                blockquote(comment),
-            ]
-        )
 
     async def _products_from_api(self, employee: Employee) -> list[YClientsProduct]:
         company = await self._companies.get_default()
@@ -229,29 +228,58 @@ def _service_catalog_lines(grouped: OrderedDict[str, OrderedDict[str, dict[str, 
     return lines
 
 
-def _product_catalog_lines(products: list[YClientsProduct], *, max_chars: int) -> tuple[list[str], int]:
+def _product_catalog_chunks(products: list[YClientsProduct], *, max_chars: int) -> list[list[str]]:
+    chunks: list[list[str]] = []
     lines: list[str] = []
-    hidden_count = 0
     current_category: str | None = None
     for product in products:
         category = _product_category(product)
         block: list[str] = []
-        if category != current_category:
+        if not lines or category != current_category:
             if lines:
                 block.append("")
             block.append(f"[{category.upper()}]")
         block.extend(_product_lines(product))
         candidate = lines + block
-        if len("\n".join(candidate)) > max_chars:
-            hidden_count += 1
-            continue
-        lines = candidate
+        if lines and len("\n".join(candidate)) > max_chars:
+            chunks.append(lines)
+            lines = [f"[{category.upper()}]", *_product_lines(product)]
+        else:
+            lines = candidate
         current_category = category
-    if hidden_count:
-        tail = ["", f"... ещё товаров: {hidden_count}"]
-        if len("\n".join(lines + tail)) <= max_chars + 80:
-            lines.extend(tail)
-    return lines, hidden_count
+    if lines:
+        chunks.append(lines)
+    return chunks
+
+
+def _product_message(
+    *,
+    employee: Employee,
+    lines: list[str],
+    products_count: int,
+    part_number: int,
+    parts_count: int,
+    query: str | None,
+) -> str:
+    summary = [
+        f"Филиал      {employee.branch.name if employee.branch else 'не указан'}",
+        f"В наличии   {products_count}",
+        "Фильтр      только в наличии",
+        "Исключено   сертификаты",
+    ]
+    if parts_count > 1:
+        summary.append(f"Часть       {part_number} из {parts_count}")
+    if query:
+        summary.append(f"Поиск       {query}")
+    return "\n\n".join([bold("ТОВАРЫ"), pre(summary), pre(lines)])
+
+
+def _visible_products(products: list[YClientsProduct]) -> list[YClientsProduct]:
+    return [
+        product
+        for product in products
+        if product.stock_amount > 0 and not _is_certificate_product(product)
+    ]
 
 
 def _product_lines(product: YClientsProduct) -> list[str]:

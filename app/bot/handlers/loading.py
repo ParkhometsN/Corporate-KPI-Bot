@@ -22,7 +22,13 @@ class RichMessageResult:
     reply_markup: Any | None = None
 
 
-LoadingResult = str | tuple[str, InlineKeyboardMarkup | None] | RichMessageResult
+@dataclass(slots=True)
+class MultiMessageResult:
+    messages: list[str]
+    reply_markup: Any | None = None
+
+
+LoadingResult = str | tuple[str, InlineKeyboardMarkup | None] | RichMessageResult | MultiMessageResult
 
 
 async def answer_with_loading(
@@ -87,6 +93,9 @@ async def _finish_with_loading(
     elif isinstance(result, RichMessageResult):
         await _send_rich_result(message, result, reply_markup=reply_markup)
         return
+    elif isinstance(result, MultiMessageResult):
+        await _send_multi_result(message, result, reply_markup=reply_markup)
+        return
     else:
         text = result
         result_markup = reply_markup
@@ -138,3 +147,23 @@ async def _send_rich_result(
         )
     except Exception as exc:
         logger.warning("rich_message_fallback", error=str(exc)[:300])
+
+
+async def _send_multi_result(
+    message: Message,
+    result: MultiMessageResult,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    messages = [text for text in result.messages if text]
+    if not messages:
+        await _safe_edit_text(message, bold("НЕТ ДАННЫХ"), reply_markup=result.reply_markup or reply_markup)
+        return
+    result_markup = result.reply_markup or reply_markup
+    if len(messages) == 1:
+        await _safe_edit_text(message, messages[0], reply_markup=result_markup)
+        return
+    await _safe_edit_text(message, messages[0])
+    for text in messages[1:-1]:
+        await message.answer(text)
+    await message.answer(messages[-1], reply_markup=result_markup)

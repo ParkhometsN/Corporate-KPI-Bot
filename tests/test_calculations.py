@@ -2,7 +2,15 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
-from app.services.catalog import _normalize_title, _product_sort_key, _wrap_text, _wrap_tokens
+from app.bot.handlers.employee import _normalize_button_text
+from app.services.catalog import (
+    _normalize_title,
+    _product_catalog_chunks,
+    _product_sort_key,
+    _visible_products,
+    _wrap_text,
+    _wrap_tokens,
+)
 from app.services.grade import _find_current_and_next, _grade_period_bounds, progress_bar
 from app.services.kpi import _earned_percent_from_rules, _kpi_bonus_base, _next_month
 from app.services.statistics import _period_bounds
@@ -174,6 +182,32 @@ def test_products_sort_stock_goods_before_certificates() -> None:
     ]
 
 
+def test_visible_products_excludes_certificates_and_out_of_stock() -> None:
+    products = [
+        YClientsProduct(1, "Сертификат «Стрижка»", Decimal("1400"), Decimal("5"), "Сертификаты"),
+        YClientsProduct(2, "Reuzel Зеленый 113гр", Decimal("2000"), Decimal("0"), "REUZEL"),
+        YClientsProduct(3, "Volcano Увлажняющий крем 50 мл", Decimal("3200"), Decimal("2"), "VOLCANO"),
+    ]
+
+    visible_titles = [product.title for product in _visible_products(products)]
+
+    assert visible_titles == ["Volcano Увлажняющий крем 50 мл"]
+
+
+def test_product_catalog_chunks_split_without_hidden_tail() -> None:
+    products = [
+        YClientsProduct(index, f"Nishman Товар {index}", Decimal("1000"), Decimal("1"), "NISHMAN")
+        for index in range(1, 8)
+    ]
+
+    chunks = _product_catalog_chunks(products, max_chars=120)
+    text = "\n".join(line for chunk in chunks for line in chunk)
+
+    assert len(chunks) > 1
+    assert "ещё товаров" not in text
+    assert "Nishman Товар 7" in text
+
+
 def test_wrap_text_respects_indented_width() -> None:
     lines = _wrap_text(
         "Стрижка + Оформление бороды + Камуфляж",
@@ -195,3 +229,9 @@ def test_wrap_tokens_keeps_money_values_together() -> None:
 
     assert all("3\n" not in line for line in lines)
     assert any("3 000 ₽" in line for line in lines)
+
+
+def test_employee_settings_button_text_normalization() -> None:
+    assert _normalize_button_text("Настройки") == "настройки"
+    assert _normalize_button_text("⚙ Настройки") == "настройки"
+    assert _normalize_button_text("⚙️ Настройки") == "настройки"

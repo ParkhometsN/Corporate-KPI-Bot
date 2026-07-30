@@ -1,7 +1,7 @@
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.handlers.loading import RichMessageResult, answer_with_loading, edit_with_loading
+from app.bot.handlers.loading import MultiMessageResult, RichMessageResult, answer_with_loading, edit_with_loading
 from app.bot.keyboards.employee import (
     employee_main_keyboard,
     notification_settings_keyboard,
@@ -11,6 +11,26 @@ from app.services.factory import ServiceContainer
 from app.utils.exceptions import AccessDeniedError
 
 router = Router(name="employee")
+
+
+def _normalize_button_text(value: str | None) -> str:
+    text = (value or "").casefold().strip()
+    return (
+        text.replace("⚙️", "")
+        .replace("⚙", "")
+        .replace("📋", "")
+        .replace("🧴", "")
+        .strip()
+    )
+
+
+def _button_text_is(*values: str):
+    normalized_values = {_normalize_button_text(value) for value in values}
+
+    def check(message: Message) -> bool:
+        return _normalize_button_text(message.text) in normalized_values
+
+    return check
 
 
 @router.message(F.text.in_({"Статистика", "📊 Статистика"}))
@@ -85,21 +105,25 @@ async def employee_services(message: Message, services: ServiceContainer) -> Non
 @router.message(F.text.in_({"Товары", "🧴 Товары"}))
 async def employee_products(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
+
+    async def load_products() -> MultiMessageResult:
+        return MultiMessageResult(await services.catalog.products_messages(employee))
+
     await answer_with_loading(
         message,
         title="ЗАГРУЗКА ТОВАРОВ",
         detail="Запрашиваю товары напрямую из YCLIENTS API.",
-        producer=lambda: services.catalog.products_text(employee),
+        producer=load_products,
     )
 
 
-@router.message(F.text.in_({"Регламент", "📋 Регламент"}))
+@router.message(_button_text_is("Регламент", "📋 Регламент"))
 async def employee_regulation(message: Message, services: ServiceContainer) -> None:
     await _require_employee(message, services)
     await message.answer(await services.admin.regulation_text())
 
 
-@router.message(F.text.in_({"Настройки", "⚙ Настройки"}))
+@router.message(_button_text_is("Настройки", "⚙ Настройки", "⚙️ Настройки", "Настройки уведомлений"))
 async def employee_settings(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
     if employee.telegram_user is None:
