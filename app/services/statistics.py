@@ -11,7 +11,13 @@ from app.repositories import CompanyRepository, DailyStatisticRepository, KpiRul
 from app.services.security import EncryptionService
 from app.utils.exceptions import AppError
 from app.utils.telegram_formatting import blockquote, bold, money as format_money, pre, progress_bar
-from app.yclients.client import YClientsClient, _calculate_daily_statistic, _record_statistic_date
+from app.yclients.client import (
+    YClientsApiError,
+    YClientsClient,
+    _calculate_daily_statistic,
+    _record_staff_id,
+    _record_statistic_date,
+)
 from app.yclients.types import YClientsDailyStatistic
 
 logger = get_logger(__name__)
@@ -58,11 +64,20 @@ class StatisticsService:
             date_to=date_to,
         )
         records_by_day = _records_by_day(records, date_from=date_from, date_to=date_to)
+        visible_staff_ids = {
+            staff_id
+            for staff_id in (_record_staff_id(record) for record in records)
+            if staff_id is not None
+        }
+        known_staff_ids = {employee.yclients_staff_id for employee in employees}
+        skip_unseen_staff = bool(visible_staff_ids and visible_staff_ids < known_staff_ids)
         remote_stats: list[YClientsDailyStatistic] = []
         day = date_from
         while day <= date_to:
             day_records = records_by_day.get(day, [])
             for employee in employees:
+                if skip_unseen_staff and employee.yclients_staff_id not in visible_staff_ids:
+                    continue
                 remote_stat = _calculate_daily_statistic(
                     employee.yclients_staff_id,
                     day,
@@ -90,6 +105,14 @@ class StatisticsService:
             date_to=date_to,
             employee_staff_id=employee.yclients_staff_id,
         )
+        visible_staff_ids = _visible_staff_ids(records)
+        if visible_staff_ids and employee.yclients_staff_id not in visible_staff_ids:
+            returned_ids = ", ".join(str(staff_id) for staff_id in sorted(visible_staff_ids))
+            raise YClientsApiError(
+                "YCLIENTS вернул записи другого staff_id вместо выбранного сотрудника. "
+                f"Запрошен {employee.yclients_staff_id}, в ответе {returned_ids}. "
+                "Текущий User token не видит журнал этого сотрудника или API игнорирует фильтр staff_id."
+            )
         records_by_day = _records_by_day(records, date_from=date_from, date_to=date_to)
         remote_stats: list[YClientsDailyStatistic] = []
         day = date_from
@@ -157,11 +180,6 @@ class StatisticsService:
         products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
         total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
         average_check = total_revenue / haircuts_count if haircuts_count else Decimal("0")
-        attendance_percent = (
-            sum((item.attendance_percent for item in stats), Decimal("0")) / len(stats)
-            if stats
-            else Decimal("0")
-        )
         kpi_base = service_revenue + additional_services_revenue
         goal_amount = await self._next_kpi_goal(kpi_base)
         goal_progress = (
@@ -179,11 +197,11 @@ class StatisticsService:
         ]
         metrics = [
             f"Стрижек             {haircuts_count}",
-            f"Услуги              {money(service_revenue)}",
+            f"Доход услуг         {money(kpi_base)}",
+            f"Основные услуги     {money(service_revenue)}",
             f"Доп. услуги         {money(additional_services_revenue)}",
             f"Общая выручка       {money(total_revenue)}",
             f"Средний чек         {money(average_check)}",
-            f"Посещаемость        {attendance_percent:.1f}%",
             f"Товаров продано     {products_sold}",
             f"Выручка по товарам  {money(products_revenue)}",
         ]
@@ -193,9 +211,9 @@ class StatisticsService:
             pre(sidebar),
             pre(metrics),
         ]
-        service_lines = _service_lines_by_day(remote_stats)
-        if service_lines:
-            parts.append(pre(["Услуги по дням", *service_lines]))
+        record_lines = _records_summary_lines(remote_stats)
+        if record_lines:
+            parts.append(pre(["Записи по API", *record_lines]))
         digest = _stats_digest(
             employee=employee,
             stats_count=len(stats),
@@ -225,10 +243,15 @@ class StatisticsService:
 
         refresh_errors = 0
         first_refresh_warning: str | None = None
+        limited_staff_by_branch: dict[str, set[int]] = {}
         if refresh:
             for branch, branch_employees in _employees_by_branch(employees):
                 try:
-                    await self.sync_branch_period(branch, branch_employees, *_period_bounds(period))
+                    branch_stats = await self.sync_branch_period(branch, branch_employees, *_period_bounds(period))
+                    synced_staff_ids = {stat.employee_staff_id for stat in branch_stats}
+                    branch_staff_ids = {employee.yclients_staff_id for employee in branch_employees}
+                    if synced_staff_ids and synced_staff_ids < branch_staff_ids:
+                        limited_staff_by_branch[str(branch.id)] = synced_staff_ids
                 except AppError as exc:
                     refresh_errors += len(branch_employees)
                     if first_refresh_warning is None:
@@ -243,18 +266,31 @@ class StatisticsService:
 
         rows = []
         for employee in employees:
-            stats = await self.get_period_stats(employee, period)
-            haircuts_count = sum(item.haircuts_count for item in stats)
-            service_revenue = sum((item.service_revenue for item in stats), Decimal("0"))
-            additional_services_revenue = sum(
-                (item.additional_services_revenue for item in stats), Decimal("0")
-            )
-            products_sold = sum(item.products_sold for item in stats)
-            products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
-            total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
+            branch_key = str(employee.branch_id) if employee.branch_id else None
+            limited_staff_ids = limited_staff_by_branch.get(branch_key or "")
+            data_unavailable = limited_staff_ids is not None and employee.yclients_staff_id not in limited_staff_ids
+            if data_unavailable:
+                stats = []
+                haircuts_count = 0
+                service_revenue = Decimal("0")
+                additional_services_revenue = Decimal("0")
+                products_sold = 0
+                products_revenue = Decimal("0")
+                total_revenue = Decimal("0")
+            else:
+                stats = await self.get_period_stats(employee, period)
+                haircuts_count = sum(item.haircuts_count for item in stats)
+                service_revenue = sum((item.service_revenue for item in stats), Decimal("0"))
+                additional_services_revenue = sum(
+                    (item.additional_services_revenue for item in stats), Decimal("0")
+                )
+                products_sold = sum(item.products_sold for item in stats)
+                products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
+                total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
             rows.append(
                 {
                     "employee": employee,
+                    "data_unavailable": data_unavailable,
                     "haircuts_count": haircuts_count,
                     "service_revenue": service_revenue,
                     "additional_services_revenue": additional_services_revenue,
@@ -274,14 +310,18 @@ class StatisticsService:
         total_revenue = sum((row["total_revenue"] for row in rows), Decimal("0"))
         average_check = total_revenue / total_haircuts if total_haircuts else Decimal("0")
         kpi_base = service_revenue + additional_services_revenue
+        unavailable_rows = [row for row in rows if row["data_unavailable"]]
+        available_rows_count = len(rows) - len(unavailable_rows)
 
         summary = [
             f"Группа       {title}",
             f"Период      {_period_title(period)}",
             *_period_lines(period),
             f"Сотрудников {len(employees)}",
+            *([f"Данные API  {available_rows_count} из {len(employees)}"] if unavailable_rows else []),
             f"Стрижек     {total_haircuts}",
-            f"Услуги      {money(service_revenue)}",
+            f"Доход услуг {money(kpi_base)}",
+            f"Основные    {money(service_revenue)}",
             f"Доп. услуги {money(additional_services_revenue)}",
             f"KPI база    {money(kpi_base)}",
             f"Товары      {products_sold} / {money(products_revenue)}",
@@ -291,21 +331,40 @@ class StatisticsService:
         table = [f"{'Сотрудник':18} {'Стр':>3} {'Выручка':>11} {'KPI':>11}"]
         for row in sorted(rows, key=lambda item: item["total_revenue"], reverse=True):
             employee = row["employee"]
-            table.append(
-                f"{employee.full_name[:18]:18} "
-                f"{row['haircuts_count']:>3} "
-                f"{money(row['total_revenue']):>11} "
-                f"{money(row['kpi_base']):>11}"
-            )
+            if row["data_unavailable"]:
+                table.append(f"{employee.full_name[:18]:18} {'-':>3} {'нет API':>11} {'-':>11}")
+            else:
+                table.append(
+                    f"{employee.full_name[:18]:18} "
+                    f"{row['haircuts_count']:>3} "
+                    f"{money(row['total_revenue']):>11} "
+                    f"{money(row['kpi_base']):>11}"
+                )
 
         digest = []
-        zero_rows = [row for row in rows if row["stats_count"] == 0]
+        zero_rows = [row for row in rows if row["stats_count"] == 0 and not row["data_unavailable"]]
         if refresh_errors:
             digest.append(f"ДАЙДЖЕСТ: по {refresh_errors} сотрудникам YCLIENTS не обновил данные.")
             if first_refresh_warning:
                 digest.append(first_refresh_warning)
+        if unavailable_rows:
+            unavailable_names = ", ".join(row["employee"].full_name for row in unavailable_rows[:4])
+            if len(unavailable_rows) > 4:
+                unavailable_names = f"{unavailable_names} и ещё {len(unavailable_rows) - 4}"
+            digest.append(
+                "ДАЙДЖЕСТ: YCLIENTS отдал свежие записи не по всей команде. "
+                f"Сотрудники без свежих строк не показаны как ноль: {unavailable_names}. "
+                "Это неполный ответ records API, а не доказательство нулевой выручки."
+            )
         if zero_rows:
             digest.append(f"ДАЙДЖЕСТ: по {len(zero_rows)} сотрудникам нет дневных строк за период.")
+        one_employee = _single_employee_with_data(rows)
+        if one_employee is not None and (zero_rows or unavailable_rows):
+            digest.append(
+                "ДАЙДЖЕСТ: YCLIENTS отдал записи только по одному staff_id "
+                f"({one_employee.full_name}). Если остальные сотрудники работали, текущий User token "
+                "ограничен этим сотрудником или отчетный API не видит командный журнал."
+            )
         if total_revenue == 0:
             digest.append("ДАЙДЖЕСТ: общая выручка за выбранный период равна 0 ₽.")
 
@@ -439,6 +498,14 @@ def _records_by_day(
     return grouped
 
 
+def _visible_staff_ids(records: list[dict]) -> set[int]:
+    return {
+        staff_id
+        for staff_id in (_record_staff_id(record) for record in records)
+        if staff_id is not None
+    }
+
+
 def _employees_by_branch(employees: list[Employee]) -> list[tuple[Branch, list[Employee]]]:
     by_branch: dict[str, tuple[Branch, list[Employee]]] = {}
     for employee in employees:
@@ -449,6 +516,39 @@ def _employees_by_branch(employees: list[Employee]) -> list[tuple[Branch, list[E
             by_branch[branch_key] = (employee.branch, [])
         by_branch[branch_key][1].append(employee)
     return list(by_branch.values())
+
+
+def _records_summary_lines(remote_stats: list[YClientsDailyStatistic]) -> list[str]:
+    records = [
+        record
+        for day_stat in remote_stats
+        for record in day_stat.raw_payload.get("records", [])
+        if isinstance(record, dict)
+    ]
+    if not records:
+        return []
+    attended_records = [record for record in records if _is_attended_record(record)]
+    completed = len(attended_records)
+    cancelled = sum(1 for record in records if _is_cancelled_record(record))
+    unfinished = max(0, len(records) - completed - cancelled)
+    client_records = [record for record in attended_records if isinstance(record.get("client"), dict)]
+    new_clients = sum(1 for record in client_records if _boolish_client_value(record["client"].get("is_new")))
+    repeat_clients = len(client_records) - new_clients
+    return [
+        f"Всего       {len(records)}",
+        f"Завершено   {completed} / {_percent_text(completed, len(records))}",
+        f"Отменено    {cancelled} / {_percent_text(cancelled, len(records))}",
+        f"Не заверш.  {unfinished} / {_percent_text(unfinished, len(records))}",
+        f"Новые       {new_clients} / {_percent_text(new_clients, len(client_records))}",
+        f"Повторные   {repeat_clients} / {_percent_text(repeat_clients, len(client_records))}",
+    ]
+
+
+def _single_employee_with_data(rows: list[dict]) -> Employee | None:
+    nonzero = [row for row in rows if row["total_revenue"] > 0 or row["haircuts_count"] > 0]
+    if len(nonzero) != 1:
+        return None
+    return nonzero[0]["employee"]
 
 
 def _stats_digest(
@@ -511,6 +611,24 @@ def _is_attended_record(record: dict) -> bool:
     if attendance is None:
         return True
     return str(attendance) not in {"-1", "0", "not_come", "no_show", "cancelled"}
+
+
+def _is_cancelled_record(record: dict) -> bool:
+    attendance = str(record.get("attendance") or "").casefold()
+    return attendance in {"-1", "not_come", "no_show", "cancelled"}
+
+
+def _boolish_client_value(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().casefold() in {"1", "true", "yes", "y", "да"}
+
+
+def _percent_text(part: int, total: int) -> str:
+    if total <= 0:
+        return "0%"
+    value = Decimal(part) / Decimal(total) * Decimal("100")
+    return f"{value.quantize(Decimal('0.1'))}%"
 
 
 def _decimal(value) -> Decimal:

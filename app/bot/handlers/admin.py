@@ -2,13 +2,13 @@ from contextlib import suppress
 from uuid import UUID
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.handlers.loading import answer_with_loading, edit_with_loading
 from app.bot.keyboards.admin import (
-    admin_dashboard_keyboard,
     admin_kpi_edit_keyboard,
     admin_kpi_keyboard,
     admin_main_keyboard,
@@ -98,9 +98,10 @@ async def admin_password(message: Message, state: FSMContext, services: ServiceC
 async def admin_dashboard(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     await state.clear()
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         await services.admin.dashboard_text(),
-        reply_markup=admin_dashboard_keyboard(),
+        reply_markup=None,
     )
     await callback.answer()
 
@@ -183,7 +184,7 @@ async def admin_regulation_button(message: Message, state: FSMContext, services:
 async def admin_kpi_button(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     await services.admin.ensure_admin(message.from_user.id)
     await state.clear()
-    await message.answer(await services.admin.kpi_settings_text(), reply_markup=admin_kpi_keyboard())
+    await message.answer(await services.admin.kpi_settings_text(), reply_markup=admin_main_keyboard())
 
 
 @router.message(StateFilter(None), F.text == "Настройки руководителя")
@@ -202,7 +203,7 @@ async def admin_check_connection_button(message: Message, services: ServiceConta
             available, existing_ids = await services.admin.available_branches()
             keyboard = available_branches_keyboard(available, existing_ids)
         except Exception:
-            keyboard = admin_dashboard_keyboard()
+            keyboard = None
         return text, keyboard
 
     await answer_with_loading(
@@ -217,7 +218,7 @@ async def admin_check_connection_button(message: Message, services: ServiceConta
 async def admin_branches(callback: CallbackQuery, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     branches = await services.admin.list_branches()
-    await callback.message.edit_text(_branches_text(branches), reply_markup=branches_keyboard(branches))
+    await _safe_edit_text(callback.message, _branches_text(branches), reply_markup=branches_keyboard(branches))
     await callback.answer()
 
 
@@ -230,7 +231,7 @@ async def admin_available_branches(callback: CallbackQuery, services: ServiceCon
         try:
             available, existing_ids = await services.admin.available_branches()
         except Exception:
-            return await services.admin.check_connection_text(), admin_dashboard_keyboard()
+            return await services.admin.check_connection_text(), None
         text = "\n\n".join(
             [
                 bold("ДОСТУПНЫЕ ФИЛИАЛЫ YCLIENTS"),
@@ -340,7 +341,8 @@ async def admin_yclients_login_start(
 ) -> None:
     await _ensure_admin(callback, services)
     if not await services.admin.is_yclients_configured():
-        await callback.message.edit_text(
+        await _safe_edit_text(
+            callback.message,
             "\n\n".join(
                 [
                     bold("YCLIENTS НЕ НАСТРОЕН"),
@@ -353,7 +355,8 @@ async def admin_yclients_login_start(
         return
     await state.clear()
     await state.set_state(AdminYClientsLoginStates.waiting_login)
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         _yclients_login_prompt_text(),
         reply_markup=yclients_login_cancel_keyboard(),
     )
@@ -368,7 +371,7 @@ async def admin_yclients_login_cancel(
 ) -> None:
     await _ensure_admin(callback, services)
     await state.clear()
-    await callback.message.edit_text(bold("НАСТРОЙКИ"), reply_markup=admin_settings_keyboard())
+    await _safe_edit_text(callback.message, bold("НАСТРОЙКИ"), reply_markup=admin_settings_keyboard())
     await callback.answer()
 
 
@@ -437,7 +440,7 @@ async def admin_yclients_password_text(
             ]
         )
         await message.answer(await services.admin.dashboard_text(), reply_markup=admin_main_keyboard())
-        return text, admin_dashboard_keyboard()
+        return text, None
 
     try:
         await answer_with_loading(
@@ -467,7 +470,8 @@ async def admin_yclients_password_text(
 async def admin_regulation(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     await state.clear()
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         await services.admin.regulation_text(for_admin=True),
         reply_markup=admin_regulation_keyboard(),
     )
@@ -478,7 +482,8 @@ async def admin_regulation(callback: CallbackQuery, state: FSMContext, services:
 async def admin_regulation_edit(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     await state.set_state(AdminRegulationStates.waiting_text)
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         "\n\n".join(
             [
                 bold("РЕДАКТИРОВАНИЕ РЕГЛАМЕНТА"),
@@ -498,7 +503,8 @@ async def admin_regulation_edit(callback: CallbackQuery, state: FSMContext, serv
 async def admin_regulation_cancel(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     await state.clear()
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         await services.admin.regulation_text(for_admin=True),
         reply_markup=admin_regulation_keyboard(),
     )
@@ -535,7 +541,8 @@ async def admin_regulation_text(message: Message, state: FSMContext, services: S
 async def admin_kpi(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     await state.clear()
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         await services.admin.kpi_settings_text(),
         reply_markup=admin_kpi_keyboard(),
     )
@@ -546,7 +553,8 @@ async def admin_kpi(callback: CallbackQuery, state: FSMContext, services: Servic
 async def admin_kpi_edit(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     await state.set_state(AdminKpiStates.waiting_rules)
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         "\n\n".join(
             [
                 bold("ИЗМЕНЕНИЕ KPI"),
@@ -570,7 +578,8 @@ async def admin_kpi_edit(callback: CallbackQuery, state: FSMContext, services: S
 async def admin_kpi_cancel(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     await state.clear()
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         await services.admin.kpi_settings_text(),
         reply_markup=admin_kpi_keyboard(),
     )
@@ -594,7 +603,8 @@ async def admin_kpi_rules_text(message: Message, state: FSMContext, services: Se
 @router.callback_query(F.data == "admin:reset")
 async def admin_reset(callback: CallbackQuery, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         "\n\n".join(
             [
                 bold("СБРОС ДО РЕГИСТРАЦИИ"),
@@ -616,7 +626,8 @@ async def admin_reset_confirm(callback: CallbackQuery, state: FSMContext, servic
     await _ensure_admin(callback, services)
     await state.clear()
     await services.admin.reset_to_registration()
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         "\n\n".join(
             [
                 bold("СБРОС ВЫПОЛНЕН"),
@@ -733,14 +744,15 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext, serv
     await state.clear()
     branches = await services.admin.list_branches()
     if not branches:
-        await callback.message.edit_text(
+        await _safe_edit_text(
+            callback.message,
             "\n\n".join(
                 [
                     bold("ДЕЙСТВИЯ ДЛЯ БАРБЕРОВ"),
                     blockquote("Сначала добавьте филиал и синхронизируйте сотрудников."),
                 ]
             ),
-            reply_markup=admin_dashboard_keyboard(),
+            reply_markup=None,
         )
         await callback.answer()
         return
@@ -748,7 +760,8 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext, serv
         await _show_broadcast_actions(callback.message, state, services, branches[0].id)
     else:
         await state.set_state(AdminBroadcastStates.choosing_branch)
-        await callback.message.edit_text(
+        await _safe_edit_text(
+            callback.message,
             "\n\n".join(
                 [
                     bold("ДЕЙСТВИЯ ДЛЯ БАРБЕРОВ"),
@@ -764,9 +777,10 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext, serv
 async def admin_broadcast_cancel(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
     await state.clear()
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         "\n\n".join([bold("РАССЫЛКА ОТМЕНЕНА"), blockquote("Действие не отправлено сотрудникам.")]),
-        reply_markup=admin_dashboard_keyboard(),
+        reply_markup=None,
     )
     await callback.answer()
 
@@ -789,7 +803,8 @@ async def admin_broadcast_message_action(
     await _ensure_admin(callback, services)
     await state.set_state(AdminBroadcastStates.waiting_message_text)
     scope, targets_count = await _broadcast_scope_summary(state, services)
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         "\n\n".join(
             [
                 bold("СООБЩЕНИЕ БАРБЕРАМ"),
@@ -807,7 +822,7 @@ async def admin_broadcast_message_cancel(message: Message, state: FSMContext) ->
     await state.clear()
     await message.answer(
         "\n\n".join([bold("РАССЫЛКА ОТМЕНЕНА"), blockquote("Действие не отправлено сотрудникам.")]),
-        reply_markup=admin_dashboard_keyboard(),
+        reply_markup=admin_main_keyboard(),
     )
 
 
@@ -845,11 +860,12 @@ async def admin_broadcast_statistics_action(
     await _ensure_admin(callback, services)
     await state.set_state(AdminBroadcastStates.confirming_statistics)
     scope, targets_count = await _broadcast_scope_summary(state, services)
-    await callback.message.edit_text(
+    await _safe_edit_text(
+        callback.message,
         "\n\n".join(
             [
-                bold("СТАТИСТИКА ЗА ПРОШЛЫЙ МЕСЯЦ"),
-                pre([f"Кому       {scope}", f"Получателей {targets_count}", *_period_lines("previous_month")]),
+                bold("СТАТИСТИКА ЗА ТЕКУЩИЙ МЕСЯЦ"),
+                pre([f"Кому       {scope}", f"Получателей {targets_count}", *_period_lines("month")]),
                 blockquote("Каждый подключённый сотрудник получит свою личную статистику за указанный период."),
             ]
         ),
@@ -876,7 +892,7 @@ async def admin_broadcast_confirm_message(
         targets = await _broadcast_targets_from_state(state, services)
         sent, failed = await _send_text_to_targets(callback, targets, _admin_broadcast_text(message_text))
         await state.clear()
-        return _broadcast_result_text("СООБЩЕНИЕ ОТПРАВЛЕНО", len(targets), sent, failed), admin_dashboard_keyboard()
+        return _broadcast_result_text("СООБЩЕНИЕ ОТПРАВЛЕНО", len(targets), sent, failed), None
 
     await edit_with_loading(
         callback.message,
@@ -897,24 +913,26 @@ async def admin_broadcast_confirm_statistics(
 
     async def send_statistics_broadcast():
         targets = await _broadcast_targets_from_state(state, services)
+        with suppress(Exception):
+            await services.statistics.refresh_team_period(targets, "month")
         sent = 0
         failed = 0
         for employee in targets:
             try:
                 await callback.bot.send_message(
                     employee.telegram_user.telegram_id,
-                    await services.statistics.employee_stats_text(employee, "previous_month"),
+                    await services.statistics.employee_stats_text(employee, "month", refresh=False),
                 )
                 sent += 1
             except Exception:
                 failed += 1
         await state.clear()
-        return _broadcast_result_text("СТАТИСТИКА ОТПРАВЛЕНА", len(targets), sent, failed), admin_dashboard_keyboard()
+        return _broadcast_result_text("СТАТИСТИКА ОТПРАВЛЕНА", len(targets), sent, failed), None
 
     await edit_with_loading(
         callback.message,
         title="ОТПРАВКА СТАТИСТИКИ",
-        detail="Собираю прошлый месяц и отправляю каждому сотруднику.",
+        detail="Собираю текущий месяц и отправляю каждому сотруднику.",
         producer=send_statistics_broadcast,
     )
 
@@ -993,7 +1011,8 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
     elif action == "delete":
         branch_id = UUID(parts[2])
         branch = await services.admin.get_branch(branch_id)
-        await callback.message.edit_text(
+        await _safe_edit_text(
+            callback.message,
             "\n\n".join(
                 [
                     bold("УДАЛИТЬ ФИЛИАЛ"),
@@ -1012,19 +1031,21 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
         branch_id = UUID(parts[2])
         deleted_branch = await services.admin.delete_branch(branch_id)
         branches = await services.admin.list_branches()
-        await callback.message.edit_text(
+        await _safe_edit_text(
+            callback.message,
             "\n\n".join(
                 [
                     bold("ФИЛИАЛ УДАЛЁН"),
                     blockquote(f"{deleted_branch.name} удалён из бота."),
                 ]
             ),
-            reply_markup=branches_keyboard(branches) if branches else admin_dashboard_keyboard(),
+            reply_markup=branches_keyboard(branches) if branches else None,
         )
     else:
         branch_id = UUID(action)
         branch = await services.admin.get_branch(branch_id)
-        await callback.message.edit_text(
+        await _safe_edit_text(
+            callback.message,
             await services.admin.branch_details_text(branch),
             reply_markup=branch_dashboard_keyboard(branch.id),
         )
@@ -1076,7 +1097,7 @@ async def employee_admin_callback(callback: CallbackQuery, services: ServiceCont
         )
     elif action == "disconnect":
         employee = await services.connection.disconnect_employee(employee.id)
-        await callback.message.edit_text(_employee_text(employee), reply_markup=employee_admin_keyboard(employee))
+        await _safe_edit_text(callback.message, _employee_text(employee), reply_markup=employee_admin_keyboard(employee))
     elif action == "stats":
         await callback.answer()
         await answer_with_loading(
@@ -1087,7 +1108,7 @@ async def employee_admin_callback(callback: CallbackQuery, services: ServiceCont
         )
         return
     else:
-        await callback.message.edit_text(_employee_text(employee), reply_markup=employee_admin_keyboard(employee))
+        await _safe_edit_text(callback.message, _employee_text(employee), reply_markup=employee_admin_keyboard(employee))
     await callback.answer()
 
 
@@ -1103,7 +1124,7 @@ async def admin_misc(callback: CallbackQuery, services: ServiceContainer) -> Non
                 available, existing_ids = await services.admin.available_branches()
                 keyboard = available_branches_keyboard(available, existing_ids)
             except Exception:
-                keyboard = admin_dashboard_keyboard()
+                keyboard = None
             return text, keyboard
 
         await edit_with_loading(
@@ -1114,24 +1135,27 @@ async def admin_misc(callback: CallbackQuery, services: ServiceContainer) -> Non
         )
         return
     elif callback.data == "admin:statistics_settings":
-        await callback.message.edit_text(
+        await _safe_edit_text(
+            callback.message,
             "\n\n".join(
                 [
                     bold("НАСТРОЙКИ СТАТИСТИКИ"),
                     blockquote("Отчёты отправляются по расписанию из .env и настроек компании."),
                 ]
             ),
-            reply_markup=admin_dashboard_keyboard(),
+            reply_markup=None,
         )
     elif callback.data == "admin:settings":
-        await callback.message.edit_text(
+        await _safe_edit_text(
+            callback.message,
             bold("НАСТРОЙКИ"),
             reply_markup=admin_settings_keyboard(),
         )
     else:
-        await callback.message.edit_text(
+        await _safe_edit_text(
+            callback.message,
             "\n\n".join([bold("НАСТРОЙКИ СТАТИСТИКИ"), blockquote("Настройки статистики обновляются через .env.")]),
-            reply_markup=admin_dashboard_keyboard(),
+            reply_markup=None,
         )
     await callback.answer()
 
@@ -1143,6 +1167,14 @@ async def _ensure_admin(callback: CallbackQuery, services: ServiceContainer) -> 
 async def _try_delete(message: Message) -> None:
     with suppress(Exception):
         await message.delete()
+
+
+async def _safe_edit_text(message: Message, text: str, *, reply_markup=None) -> None:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
 
 
 def _branch_text(branch) -> str:
@@ -1242,7 +1274,7 @@ async def _show_broadcast_actions(
         ]
     )
     if edit:
-        await message.edit_text(text, reply_markup=broadcast_action_keyboard())
+        await _safe_edit_text(message, text, reply_markup=broadcast_action_keyboard())
     else:
         await message.answer(text, reply_markup=broadcast_action_keyboard())
 

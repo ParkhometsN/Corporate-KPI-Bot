@@ -5,27 +5,12 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from app.models import Branch, Employee
 
 
-def admin_dashboard_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Филиалы", callback_data="admin:branches")],
-            [InlineKeyboardButton(text="Статистика команды", callback_data="admin:team_stats:month")],
-            [InlineKeyboardButton(text="Действия для барберов", callback_data="admin:broadcast")],
-            [InlineKeyboardButton(text="Регламент", callback_data="admin:regulation")],
-            [InlineKeyboardButton(text="Настройки статистики", callback_data="admin:statistics_settings")],
-            [InlineKeyboardButton(text="KPI", callback_data="admin:kpi")],
-            [InlineKeyboardButton(text="Настройки", callback_data="admin:settings")],
-            [InlineKeyboardButton(text="✅ Проверка подключения", callback_data="admin:check_connection")],
-        ]
-    )
-
-
 def admin_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Филиалы"), KeyboardButton(text="Статистика команды")],
             [KeyboardButton(text="Действия для барберов"), KeyboardButton(text="Регламент компании")],
-            [KeyboardButton(text="KPI команды"), KeyboardButton(text="Настройки руководителя")],
+            [KeyboardButton(text="Настройки руководителя")],
             [KeyboardButton(text="Проверка подключения")],
         ],
         resize_keyboard=True,
@@ -55,6 +40,7 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Обновить YCLIENTS", callback_data="admin:setup_yclients")],
             [InlineKeyboardButton(text="Войти в YCLIENTS", callback_data="admin:yclients_login")],
             [InlineKeyboardButton(text="Обновить User token", callback_data="admin:setup_user_token")],
+            [InlineKeyboardButton(text="Настройка KPI", callback_data="admin:kpi")],
             [InlineKeyboardButton(text="Регламент", callback_data="admin:regulation")],
             [InlineKeyboardButton(text="Сброс до регистрации", callback_data="admin:reset")],
             [InlineKeyboardButton(text="Назад", callback_data="admin:dashboard")],
@@ -127,7 +113,7 @@ def broadcast_action_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Отправить сообщение", callback_data="broadcast:action:message")],
-            [InlineKeyboardButton(text="Статистика за прошлый месяц", callback_data="broadcast:action:stats")],
+            [InlineKeyboardButton(text="Статистика за текущий месяц", callback_data="broadcast:action:stats")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
         ]
     )
@@ -167,7 +153,6 @@ def branch_dashboard_keyboard(branch_id: UUID) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Сотрудники", callback_data=f"branch:employees:{branch}")],
             [InlineKeyboardButton(text="Статистика", callback_data=f"branch:stats:month:{branch}")],
-            [InlineKeyboardButton(text="KPI", callback_data=f"branch:kpi:{branch}")],
             [InlineKeyboardButton(text="✅ Проверка подключения", callback_data=f"branch:check:{branch}")],
             [InlineKeyboardButton(text="Удалить филиал", callback_data=f"branch:delete:{branch}")],
             [InlineKeyboardButton(text="Назад", callback_data="admin:branches")],
