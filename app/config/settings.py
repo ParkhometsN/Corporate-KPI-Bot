@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     admin_password: str
     telegram_request_timeout_seconds: int = 120
     telegram_polling_timeout_seconds: int = 25
+    telegram_proxy_url: str | None = None
 
     database_url: str
     postgres_db: str = "kpi_bot"
@@ -61,7 +62,7 @@ class Settings(BaseSettings):
     def normalize_log_level(cls, value: str) -> str:
         return value.upper()
 
-    @field_validator("yclients_user_token", mode="before")
+    @field_validator("telegram_proxy_url", "yclients_user_token", mode="before")
     @classmethod
     def empty_token_to_none(cls, value: str | None) -> str | None:
         if value is None:

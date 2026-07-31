@@ -39,7 +39,10 @@ async def main() -> None:
 
     bot = Bot(
         token=settings.bot_token,
-        session=AiohttpSession(timeout=settings.telegram_request_timeout_seconds),
+        session=AiohttpSession(
+            proxy=settings.telegram_proxy_url,
+            timeout=settings.telegram_request_timeout_seconds,
+        ),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     storage = _create_storage(settings)

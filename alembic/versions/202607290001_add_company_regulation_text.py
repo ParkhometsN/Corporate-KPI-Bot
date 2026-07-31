@@ -15,8 +15,14 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("companies", sa.Column("regulation_text", sa.Text(), nullable=True))
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("companies")}
+    if "regulation_text" not in columns:
+        op.add_column("companies", sa.Column("regulation_text", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
-    op.drop_column("companies", "regulation_text")
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("companies")}
+    if "regulation_text" in columns:
+        op.drop_column("companies", "regulation_text")
