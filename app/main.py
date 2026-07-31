@@ -3,6 +3,7 @@ from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -38,6 +39,7 @@ async def main() -> None:
 
     bot = Bot(
         token=settings.bot_token,
+        session=AiohttpSession(timeout=settings.telegram_request_timeout_seconds),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     storage = _create_storage(settings)
@@ -63,7 +65,11 @@ async def main() -> None:
 
     logger.info("bot_started", environment=settings.environment)
     try:
-        await _start_polling_with_retries(dispatcher, bot)
+        await _start_polling_with_retries(
+            dispatcher,
+            bot,
+            polling_timeout=settings.telegram_polling_timeout_seconds,
+        )
     finally:
         scheduler.shutdown(wait=False)
         if api_task:
@@ -75,12 +81,20 @@ async def main() -> None:
         await engine.dispose()
 
 
-async def _start_polling_with_retries(dispatcher: Dispatcher, bot: Bot) -> None:
+async def _start_polling_with_retries(
+    dispatcher: Dispatcher,
+    bot: Bot,
+    polling_timeout: int,
+) -> None:
     retry_delay = POLLING_RETRY_INITIAL_SECONDS
     allowed_updates = dispatcher.resolve_used_update_types()
     while True:
         try:
-            await dispatcher.start_polling(bot, allowed_updates=allowed_updates)
+            await dispatcher.start_polling(
+                bot,
+                allowed_updates=allowed_updates,
+                polling_timeout=polling_timeout,
+            )
             return
         except TelegramNetworkError as exc:
             logger.warning(

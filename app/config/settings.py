@@ -18,6 +18,8 @@ class Settings(BaseSettings):
 
     bot_token: str
     admin_password: str
+    telegram_request_timeout_seconds: int = 120
+    telegram_polling_timeout_seconds: int = 25
 
     database_url: str
     postgres_db: str = "kpi_bot"

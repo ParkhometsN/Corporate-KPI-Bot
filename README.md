@@ -80,6 +80,8 @@ docker system prune -f
 
 - `BOT_TOKEN` — токен Telegram-бота.
 - `ADMIN_PASSWORD` — пароль входа через `/admin`.
+- `TELEGRAM_REQUEST_TIMEOUT_SECONDS` — сетевой таймаут Telegram Bot API, по умолчанию 120 секунд.
+- `TELEGRAM_POLLING_TIMEOUT_SECONDS` — таймаут long polling, по умолчанию 25 секунд.
 - `DATABASE_URL` — async SQLAlchemy URL.
 - `REDIS_URL` — Redis для FSM-storage и инфраструктуры.
 - `FSM_STORAGE` — `redis` или `memory`. Для дешёвого lite-режима используйте `memory`.
@@ -189,6 +191,7 @@ curl -X POST http://localhost:8080/api/branches/sync \
 - Проверьте права системного пользователя YCLIENTS: без User token часть закрытых методов API может быть недоступна.
 - Запускайте контейнеры за reverse proxy с TLS, если внутренний API открыт не только локально.
 - Для polling Telegram не нужен внешний webhook URL. Если нужен webhook-режим, его можно добавить отдельным entrypoint.
+- Если бот стартует, но не отвечает, а в логах есть `telegram_polling_network_error`, проверьте доступ контейнера к `api.telegram.org`. Пока polling не подключился к Telegram, бот не получает нажатия кнопок и сообщения.
 - APScheduler читает активные расписания из таблицы `schedules`; при первом старте создаются расписания из `.env`.
 
 ## Проверки
