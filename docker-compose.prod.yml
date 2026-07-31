@@ -17,6 +17,11 @@ services:
       - "127.0.0.1:${INTERNAL_API_PORT:-8080}:8080"
     volumes:
       - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   postgres:
     image: postgres:16-alpine
@@ -32,6 +37,11 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   redis:
     image: redis:7-alpine
@@ -44,6 +54,11 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   adminer:
     image: adminer:4
@@ -55,6 +70,11 @@ services:
     ports:
       - "127.0.0.1:8081:8080"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
 
 volumes:
   postgres_data:

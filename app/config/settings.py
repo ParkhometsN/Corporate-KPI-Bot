@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     postgres_password: str
 
     redis_url: str = "redis://redis:6379/0"
+    fsm_storage: str = "redis"
 
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
@@ -65,6 +66,14 @@ class Settings(BaseSettings):
             return None
         value = value.strip()
         return value or None
+
+    @field_validator("fsm_storage")
+    @classmethod
+    def validate_fsm_storage(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"redis", "memory"}:
+            raise ValueError("FSM_STORAGE должен быть redis или memory.")
+        return value
 
     @property
     def tzinfo(self) -> ZoneInfo:

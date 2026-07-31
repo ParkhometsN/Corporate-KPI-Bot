@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
 import uvicorn
 
@@ -39,7 +40,7 @@ async def main() -> None:
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    storage = RedisStorage.from_url(settings.redis_url)
+    storage = _create_storage(settings)
     dispatcher = Dispatcher(storage=storage)
     dispatcher.update.middleware(ErrorHandlerMiddleware())
     dispatcher.update.middleware(DatabaseSessionMiddleware(session_factory, settings))
@@ -89,6 +90,13 @@ async def _start_polling_with_retries(dispatcher: Dispatcher, bot: Bot) -> None:
             )
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, POLLING_RETRY_MAX_SECONDS)
+
+
+def _create_storage(settings):
+    if settings.fsm_storage == "memory":
+        logger.warning("memory_fsm_storage_enabled")
+        return MemoryStorage()
+    return RedisStorage.from_url(settings.redis_url)
 
 
 if __name__ == "__main__":

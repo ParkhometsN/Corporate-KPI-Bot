@@ -47,6 +47,31 @@ docker compose -f docker-compose.prod.yml --profile tools up -d adminer
 
 Внутренний API в production привязан к `127.0.0.1:${INTERNAL_API_PORT:-8080}`. Если API нужен снаружи, ставьте reverse proxy с TLS.
 
+## Экономный запуск
+
+Для дешёвого VPS можно запустить lite-режим: только бот и PostgreSQL, без Redis, Adminer и внутреннего API.
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.lite.yml up -d --build
+```
+
+В lite-режиме:
+
+- `FSM_STORAGE=memory` — состояния диалогов хранятся в памяти бота.
+- `INTERNAL_API_ENABLED=false` — внутренний FastAPI не запускается.
+- `LOG_LEVEL=WARNING` — обычные информационные логи выключены.
+- Docker-логи ограничены ротацией `5 MB x 2`.
+- PostgreSQL запускается с более маленькими лимитами памяти.
+
+Компромисс lite-режима: при перезапуске контейнера незавершённые диалоги сбрасываются. Уже сохранённые сотрудники, филиалы, KPI и статистика остаются в PostgreSQL.
+
+Для очень бюджетного VPS лучше целиться хотя бы в `1 vCPU / 1 GB RAM / 20-30 GB NVMe`. `10 GB` диска может закончиться из-за Docker-образов, базы и обновлений. Если диск всё же 10 GB, регулярно чистите старые Docker-слои:
+
+```bash
+docker system prune -f
+```
+
 ## Переменные окружения
 
 Файл `.env` уже создан локально и добавлен в `.gitignore`. Для переноса на сервер используйте `.env.example` как шаблон.
@@ -57,6 +82,7 @@ docker compose -f docker-compose.prod.yml --profile tools up -d adminer
 - `ADMIN_PASSWORD` — пароль входа через `/admin`.
 - `DATABASE_URL` — async SQLAlchemy URL.
 - `REDIS_URL` — Redis для FSM-storage и инфраструктуры.
+- `FSM_STORAGE` — `redis` или `memory`. Для дешёвого lite-режима используйте `memory`.
 - `JWT_SECRET_KEY` — подпись внутренних JWT.
 - `ENCRYPTION_KEY` — Fernet-ключ для шифрования YCLIENTS-credential в БД.
 - `YCLIENTS_PARTNER_TOKEN` — ключ приложения YCLIENTS.
