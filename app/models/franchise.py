@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -25,6 +25,7 @@ class Franchisee(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     can_view_owner_branches: Mapped[bool] = mapped_column(default=False, nullable=False)
     can_message_owner_employees: Mapped[bool] = mapped_column(default=False, nullable=False)
     can_receive_owner_statistics: Mapped[bool] = mapped_column(default=False, nullable=False)
+    encrypted_yclients_user_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     connected_at: Mapped[datetime | None] = mapped_column(nullable=True)
     blocked_at: Mapped[datetime | None] = mapped_column(nullable=True)
     blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -53,6 +54,8 @@ class FranchiseInvite(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("telegram_users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    admin_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    admin_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     company = relationship("Company")
     franchisee = relationship("Franchisee", back_populates="invites")

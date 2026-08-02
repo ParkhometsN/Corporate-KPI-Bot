@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 import re
@@ -31,6 +32,12 @@ from app.yclients.client import YClientsClient
 from app.yclients.types import YClientsBranch
 
 logger = get_logger(__name__)
+
+
+@dataclass(slots=True)
+class AdminMessageRef:
+    chat_id: int
+    message_id: int
 
 
 class AdminService:
@@ -117,9 +124,16 @@ class AdminService:
         if user.role == Role.ADMIN:
             return await self._branches.list_by_company(company.id)
         franchisee = await self._require_franchisee(user)
-        if franchisee.can_view_owner_branches:
-            return await self._branches.list_by_company(company.id)
         owned = await self._branches.list_owned_by_user(company.id, user.id)
+        owner_branches = (
+            [
+                branch
+                for branch in await self._branches.list_by_company(company.id)
+                if branch.owner_telegram_user_id is None
+            ]
+            if franchisee.can_view_owner_branches
+            else []
+        )
         accessed = [
             access.branch
             for access in franchisee.branch_accesses
@@ -131,7 +145,7 @@ class AdminService:
                 or access.can_manage_employees
             )
         ]
-        by_id = {branch.id: branch for branch in [*owned, *accessed]}
+        by_id = {branch.id: branch for branch in [*owned, *owner_branches, *accessed]}
         return sorted(by_id.values(), key=lambda branch: branch.name)
 
     async def add_branch(self, yclients_branch_id: int, *, created_by_telegram_id: int | None = None) -> Branch:
@@ -139,11 +153,12 @@ class AdminService:
         if not self._company_has_yclients_credentials(company):
             raise EntityNotFoundError("Сначала укажите YCLIENTS API key и Partner ID.")
         owner_user_id = None
+        actor: TelegramUser | None = None
         if created_by_telegram_id is not None:
-            user = await self.ensure_manager(created_by_telegram_id)
-            if user.role == Role.FRANCHISEE:
-                owner_user_id = user.id
-        client = self._client_for_company(company)
+            actor = await self.ensure_manager(created_by_telegram_id)
+            if actor.role == Role.FRANCHISEE:
+                owner_user_id = actor.id
+        client = await self._client_for_actor(company, actor)
         remote_branch = await client.get_company(yclients_branch_id)
         branch = await self._branches.upsert(
             company_id=company.id,
@@ -152,7 +167,7 @@ class AdminService:
             name=remote_branch.title,
             address=remote_branch.address,
         )
-        await self._sync.sync_branch(branch, company=company)
+        await self._sync.sync_branch(branch, company=company, client=client)
         return branch
 
     async def get_branch(self, branch_id: UUID) -> Branch:
@@ -167,7 +182,9 @@ class AdminService:
         if user.role == Role.ADMIN:
             return branch
         franchisee = await self._require_franchisee(user)
-        if franchisee.can_view_owner_branches or branch.owner_telegram_user_id == user.id:
+        if branch.owner_telegram_user_id == user.id:
+            return branch
+        if franchisee.can_view_owner_branches and branch.owner_telegram_user_id is None:
             return branch
         for access in franchisee.branch_accesses:
             if (
@@ -230,7 +247,7 @@ class AdminService:
             branch.id
             for branch in branches
             if branch.owner_telegram_user_id == user.id
-            or franchisee.can_message_owner_employees
+            or (franchisee.can_message_owner_employees and branch.owner_telegram_user_id is None)
             or any(
                 access.branch_id == branch.id
                 and access.is_active
@@ -312,6 +329,20 @@ class AdminService:
         invite.used_at = now
         await self._session.flush()
         return franchisee
+
+    async def attach_franchise_invite_message(self, code: str, *, chat_id: int, message_id: int) -> None:
+        invite = await self._franchise_invites.get_by_hash(self._code_hashes.hash_code(code))
+        if invite is None:
+            return
+        invite.admin_chat_id = chat_id
+        invite.admin_message_id = message_id
+        await self._session.flush()
+
+    async def franchise_invite_admin_message(self, code: str) -> AdminMessageRef | None:
+        invite = await self._franchise_invites.get_by_hash(self._code_hashes.hash_code(code))
+        if invite is None or invite.admin_chat_id is None or invite.admin_message_id is None:
+            return None
+        return AdminMessageRef(chat_id=invite.admin_chat_id, message_id=invite.admin_message_id)
 
     async def list_franchisees(self) -> list[Franchisee]:
         company = await self._require_company()
@@ -431,7 +462,13 @@ class AdminService:
         await self._companies.update_yclients_user_token(company, encrypted_user_token)
         return company
 
-    async def setup_yclients_login_password(self, *, login: str, password: str) -> Company:
+    async def setup_yclients_login_password(
+        self,
+        *,
+        login: str,
+        password: str,
+        telegram_id: int | None = None,
+    ) -> Company:
         company = await self._require_company()
         if not self._company_has_yclients_credentials(company):
             raise EntityNotFoundError("Сначала укажите YCLIENTS API key и Partner ID.")
@@ -440,6 +477,15 @@ class AdminService:
         if not password:
             raise ValidationError("Введите пароль от аккаунта YCLIENTS.")
         user_token = await self._client_for_company(company).authenticate_user(login, password)
+        if telegram_id is not None:
+            user = await self.ensure_manager(telegram_id)
+            if user.role == Role.FRANCHISEE:
+                franchisee = await self._require_franchisee(user)
+                await self._franchisees.update_yclients_user_token(
+                    franchisee,
+                    self._encryption.encrypt(user_token),
+                )
+                return company
         return await self.setup_yclients_user_token(user_token, validate_manual=False)
 
     async def regulation_text(self, *, for_admin: bool = False) -> str:
@@ -566,12 +612,13 @@ class AdminService:
         await self._session.flush()
         logger.info("admin_reset_to_registration", company_id=str(company.id), deleted_users=deleted_users)
 
-    async def check_connection_text(self) -> str:
+    async def check_connection_text(self, telegram_id: int | None = None) -> str:
         company = await self._require_company()
         if not self._company_has_yclients_credentials(company):
             return "YCLIENTS не настроен. Укажите API key и Partner ID в настройках."
-        client = self._client_for_company(company)
         try:
+            actor = await self.ensure_manager(telegram_id) if telegram_id is not None else None
+            client = await self._client_for_actor(company, actor)
             branches = await client.list_branches(company.partner_id)
         except Exception as exc:
             return "\n\n".join(
@@ -627,11 +674,12 @@ class AdminService:
             parts.append(blockquote("Нажмите на филиал ниже, чтобы добавить его в бота и подтянуть данные."))
         return "\n\n".join(parts)
 
-    async def available_branches(self) -> tuple[list[YClientsBranch], set[int]]:
+    async def available_branches(self, telegram_id: int | None = None) -> tuple[list[YClientsBranch], set[int]]:
         company = await self._require_company()
         if not self._company_has_yclients_credentials(company):
             raise EntityNotFoundError("Сначала укажите YCLIENTS API key и Partner ID.")
-        client = self._client_for_company(company)
+        actor = await self.ensure_manager(telegram_id) if telegram_id is not None else None
+        client = await self._client_for_actor(company, actor)
         available = await client.list_branches(company.partner_id)
         existing = await self._branches.list_by_company(company.id)
         return available, {branch.yclients_branch_id for branch in existing}
@@ -672,6 +720,11 @@ class AdminService:
             user = await self._telegram_users.get_by_telegram_id(telegram_id)
             if user and user.role == Role.FRANCHISEE:
                 role_line = "Роль           руководитель филиала"
+                franchisee = await self._franchisees.get_by_telegram_user_id(user.id)
+                if franchisee is not None:
+                    user_token_status = self._token_status(
+                        self._encryption.decrypt(franchisee.encrypted_yclients_user_token)
+                    )
         return "\n\n".join(
             [
                 bold("ПАНЕЛЬ РУКОВОДИТЕЛЯ"),
@@ -701,12 +754,35 @@ class AdminService:
             raise AccessDeniedError("Доступ руководителя филиала заблокирован.")
         return franchisee
 
+    async def franchisee_has_yclients_user_token(self, telegram_id: int) -> bool:
+        user = await self.ensure_manager(telegram_id)
+        if user.role != Role.FRANCHISEE:
+            return True
+        franchisee = await self._require_franchisee(user)
+        token = self._encryption.decrypt(franchisee.encrypted_yclients_user_token)
+        return bool(token and len(token.strip()) >= 20)
+
     def _client_for_company(self, company: Company) -> YClientsClient:
         partner_token = self._encryption.decrypt(company.encrypted_yclients_api_key)
+        return self._client(company, user_token=self._company_user_token(company), partner_token=partner_token)
+
+    async def _client_for_actor(self, company: Company, user: TelegramUser | None) -> YClientsClient:
+        partner_token = self._encryption.decrypt(company.encrypted_yclients_api_key)
+        user_token = self._company_user_token(company)
+        if user is not None and user.role == Role.FRANCHISEE:
+            franchisee = await self._require_franchisee(user)
+            token = self._encryption.decrypt(franchisee.encrypted_yclients_user_token)
+            if token:
+                user_token = token
+            else:
+                raise ValidationError("Сначала войдите в YCLIENTS, чтобы бот получил доступ к вашим филиалам.")
+        return self._client(company, user_token=user_token, partner_token=partner_token)
+
+    def _client(self, company: Company, *, user_token: str | None, partner_token: str | None) -> YClientsClient:
         return YClientsClient(
             base_url=self._settings.yclients_base_url_str,
             partner_token=partner_token or self._settings.yclients_partner_token,
-            user_token=self._company_user_token(company),
+            user_token=user_token,
             timeout_seconds=self._settings.yclients_timeout_seconds,
             product_max_pages=self._settings.yclients_product_max_pages,
         )
@@ -715,7 +791,9 @@ class AdminService:
         return self._encryption.decrypt(company.encrypted_yclients_user_token) or self._settings.yclients_user_token
 
     def _company_user_token_status(self, company: Company) -> str:
-        user_token = self._company_user_token(company)
+        return self._token_status(self._company_user_token(company))
+
+    def _token_status(self, user_token: str | None) -> str:
         if not user_token:
             return "❌ не настроен"
         if len(user_token.strip()) < 20:

@@ -3,6 +3,7 @@ from uuid import UUID
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from app.models import Branch, Employee
+from app.services.statistics import canonical_period, period_kind, shifted_period
 
 
 def admin_main_keyboard() -> ReplyKeyboardMarkup:
@@ -12,6 +13,18 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="Действия для барберов"), KeyboardButton(text="Регламент компании")],
             [KeyboardButton(text="Франчайзи"), KeyboardButton(text="Настройки руководителя")],
             [KeyboardButton(text="Проверка подключения")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Панель руководителя",
+    )
+
+
+def franchisee_main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Филиалы"), KeyboardButton(text="Статистика команды")],
+            [KeyboardButton(text="Действия для барберов"), KeyboardButton(text="Проверка подключения")],
+            [KeyboardButton(text="Настройки руководителя")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Панель руководителя",
@@ -42,9 +55,17 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Обновить User token", callback_data="admin:setup_user_token")],
             [InlineKeyboardButton(text="Настройка KPI", callback_data="admin:kpi")],
             [InlineKeyboardButton(text="Настройка Grade Up", callback_data="admin:grade")],
-            [InlineKeyboardButton(text="Руководители филиалов", callback_data="admin:franchisees")],
             [InlineKeyboardButton(text="Регламент", callback_data="admin:regulation")],
             [InlineKeyboardButton(text="Сброс до регистрации", callback_data="admin:reset")],
+            [InlineKeyboardButton(text="Назад", callback_data="admin:dashboard")],
+        ]
+    )
+
+
+def franchisee_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Войти в YCLIENTS", callback_data="admin:yclients_login")],
             [InlineKeyboardButton(text="Назад", callback_data="admin:dashboard")],
         ]
     )
@@ -223,6 +244,17 @@ def employee_admin_keyboard(employee: Employee) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def employee_stats_period_keyboard(employee_id: UUID, selected_period: str) -> InlineKeyboardMarkup:
+    employee = str(employee_id)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            _period_navigation_buttons("employee:stats", employee, selected_period),
+            _period_buttons("employee:stats", employee, selected_period),
+            [InlineKeyboardButton(text="Назад к сотруднику", callback_data=f"employee:{employee}")],
+        ]
+    )
+
+
 def back_to_employees_keyboard(branch_id: UUID) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -231,10 +263,19 @@ def back_to_employees_keyboard(branch_id: UUID) -> InlineKeyboardMarkup:
     )
 
 
+def back_to_franchisees_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Назад к франчайзи", callback_data="admin:franchisees")],
+        ]
+    )
+
+
 def branch_stats_period_keyboard(branch_id: UUID, selected_period: str) -> InlineKeyboardMarkup:
     branch = str(branch_id)
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            _period_navigation_buttons("branch:stats", branch, selected_period),
             _period_buttons("branch:stats", branch, selected_period),
             [InlineKeyboardButton(text="Назад к филиалу", callback_data=f"branch:{branch}")],
         ]
@@ -244,6 +285,7 @@ def branch_stats_period_keyboard(branch_id: UUID, selected_period: str) -> Inlin
 def team_stats_period_keyboard(selected_period: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            _period_navigation_buttons("admin:team_stats", None, selected_period),
             _period_buttons("admin:team_stats", None, selected_period),
             [InlineKeyboardButton(text="Назад", callback_data="admin:dashboard")],
         ]
@@ -251,13 +293,30 @@ def team_stats_period_keyboard(selected_period: str) -> InlineKeyboardMarkup:
 
 
 def _period_buttons(prefix: str, branch: str | None, selected_period: str) -> list[InlineKeyboardButton]:
-    periods = (("today", "День"), ("week", "Неделя"), ("month", "Месяц"))
+    selected = canonical_period(selected_period)
+    selected_kind = period_kind(selected)
+    periods = (("today", "day", "День"), ("week", "week", "Неделя"), ("month", "month", "Месяц"))
     buttons = []
-    for period, title in periods:
-        marker = "✅ " if period == selected_period else ""
+    for period, kind, title in periods:
+        marker = "✅ " if kind == selected_kind else ""
         callback_data = f"{prefix}:{period}:{branch}" if branch else f"{prefix}:{period}"
         buttons.append(InlineKeyboardButton(text=f"{marker}{title}", callback_data=callback_data))
     return buttons
+
+
+def _period_navigation_buttons(prefix: str, branch: str | None, selected_period: str) -> list[InlineKeyboardButton]:
+    selected = canonical_period(selected_period)
+    previous_period = shifted_period(selected, -1)
+    next_period = shifted_period(selected, 1)
+
+    def data(period: str) -> str:
+        return f"{prefix}:{period}:{branch}" if branch else f"{prefix}:{period}"
+
+    return [
+        InlineKeyboardButton(text="‹", callback_data=data(previous_period)),
+        InlineKeyboardButton(text="Обновить", callback_data=data(selected)),
+        InlineKeyboardButton(text="›", callback_data=data(next_period)),
+    ]
 
 
 def franchisees_keyboard(franchisees: list) -> InlineKeyboardMarkup:
@@ -266,7 +325,7 @@ def franchisees_keyboard(franchisees: list) -> InlineKeyboardMarkup:
         for franchisee in franchisees
     ]
     rows.append([InlineKeyboardButton(text="Создать ссылку подключения", callback_data="franchise:invite")])
-    rows.append([InlineKeyboardButton(text="Назад", callback_data="admin:settings")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="admin:dashboard")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

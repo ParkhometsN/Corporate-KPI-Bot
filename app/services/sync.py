@@ -7,6 +7,7 @@ from app.repositories import (
     BranchRepository,
     CompanyRepository,
     EmployeeRepository,
+    FranchiseeRepository,
     ServiceRepository,
 )
 from app.services.security import EncryptionService
@@ -22,6 +23,7 @@ class SyncService:
         self._companies = CompanyRepository(session)
         self._branches = BranchRepository(session)
         self._employees = EmployeeRepository(session)
+        self._franchisees = FranchiseeRepository(session)
         self._services = ServiceRepository(session)
         self._encryption = EncryptionService(settings)
 
@@ -36,11 +38,17 @@ class SyncService:
             synced.append(branch)
         return synced
 
-    async def sync_branch(self, branch: Branch, *, company: Company | None = None) -> Branch:
+    async def sync_branch(
+        self,
+        branch: Branch,
+        *,
+        company: Company | None = None,
+        client: YClientsClient | None = None,
+    ) -> Branch:
         company = company or await self._companies.get(branch.company_id)
         if company is None:
             return branch
-        client = self._client_for_company(company)
+        client = client or await self._client_for_branch(company, branch)
         try:
             employees = await client.list_employees(branch.yclients_branch_id)
             active_staff_ids = {employee.id for employee in employees}
@@ -87,6 +95,18 @@ class SyncService:
     def _client_for_company(self, company: Company) -> YClientsClient:
         partner_token = self._encryption.decrypt(company.encrypted_yclients_api_key)
         user_token = self._encryption.decrypt(company.encrypted_yclients_user_token) or self._settings.yclients_user_token
+        return self._client(company, user_token=user_token, partner_token=partner_token)
+
+    async def _client_for_branch(self, company: Company, branch: Branch) -> YClientsClient:
+        partner_token = self._encryption.decrypt(company.encrypted_yclients_api_key)
+        user_token = self._encryption.decrypt(company.encrypted_yclients_user_token) or self._settings.yclients_user_token
+        if branch.owner_telegram_user_id is not None:
+            franchisee = await self._franchisees.get_by_telegram_user_id(branch.owner_telegram_user_id)
+            if franchisee and franchisee.encrypted_yclients_user_token:
+                user_token = self._encryption.decrypt(franchisee.encrypted_yclients_user_token)
+        return self._client(company, user_token=user_token, partner_token=partner_token)
+
+    def _client(self, company: Company, *, user_token: str | None, partner_token: str | None) -> YClientsClient:
         return YClientsClient(
             base_url=self._settings.yclients_base_url_str,
             partner_token=partner_token or self._settings.yclients_partner_token,

@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.logging import get_logger
 from app.config.settings import Settings
-from app.models import Branch, Employee
-from app.repositories import CompanyRepository, DailyStatisticRepository, KpiRuleRepository
+from app.models import Branch, Company, Employee
+from app.repositories import CompanyRepository, DailyStatisticRepository, FranchiseeRepository, KpiRuleRepository
 from app.services.security import EncryptionService
 from app.utils.exceptions import AppError
 from app.utils.rich_messages import cell, key_value_rows, paragraph, rich_message, table, table_rows
@@ -24,6 +24,20 @@ from app.yclients.types import YClientsDailyStatistic
 
 logger = get_logger(__name__)
 _REFRESH_CACHE: dict[tuple[str, str, str, date, date], float] = {}
+_MONTH_NAMES = (
+    "январь",
+    "февраль",
+    "март",
+    "апрель",
+    "май",
+    "июнь",
+    "июль",
+    "август",
+    "сентябрь",
+    "октябрь",
+    "ноябрь",
+    "декабрь",
+)
 
 
 class StatisticsService:
@@ -31,6 +45,7 @@ class StatisticsService:
         self._settings = settings
         self._companies = CompanyRepository(session)
         self._daily_stats = DailyStatisticRepository(session)
+        self._franchisees = FranchiseeRepository(session)
         self._kpi_rules = KpiRuleRepository(session)
         self._encryption = EncryptionService(settings)
 
@@ -38,10 +53,10 @@ class StatisticsService:
         company = await self._companies.get_default()
         if company is None:
             return None
-        client = self._client_for_company(company)
         branch = employee.branch
         if branch is None:
             return None
+        client = await self._client_for_branch(company, branch)
         remote_stat = await client.get_daily_statistics(
             company_id=branch.yclients_branch_id,
             employee_staff_id=employee.yclients_staff_id,
@@ -60,7 +75,7 @@ class StatisticsService:
         company = await self._companies.get_default()
         if company is None:
             return []
-        client = self._client_for_company(company)
+        client = await self._client_for_branch(company, branch)
         records = await client.list_records(
             company_id=branch.yclients_branch_id,
             date_from=date_from,
@@ -101,7 +116,7 @@ class StatisticsService:
         company = await self._companies.get_default()
         if company is None or employee.branch is None:
             return []
-        client = self._client_for_company(company)
+        client = await self._client_for_branch(company, employee.branch)
         records = await client.list_records(
             company_id=employee.branch.yclients_branch_id,
             date_from=date_from,
@@ -181,12 +196,7 @@ class StatisticsService:
             except Exception as exc:
                 logger.exception("employee_stats_refresh_failed", employee_id=str(employee.id), period=period)
         stats = await self.get_period_stats(employee, period)
-        title = {
-            "today": "СЕГОДНЯ",
-            "week": "ЗА НЕДЕЛЮ",
-            "month": "ЗА МЕСЯЦ",
-            "previous_month": "ЗА ПРОШЛЫЙ МЕСЯЦ",
-        }.get(period, "ЗА ПЕРИОД")
+        title = _period_title(period)
         haircuts_count = sum(item.haircuts_count for item in stats)
         service_revenue = sum((item.service_revenue for item in stats), Decimal("0"))
         additional_services_revenue = sum(
@@ -256,7 +266,7 @@ class StatisticsService:
             table(
                 key_value_rows(
                     [
-                        ("Месяц", period_values["month"]),
+                        ("Период", period_values["period"]),
                         ("Даты", period_values["dates"]),
                         ("Сотрудник", employee.full_name),
                         ("Филиал", employee.branch.name if employee.branch else "не указан"),
@@ -378,7 +388,6 @@ class StatisticsService:
 
         summary = [
             f"Группа       {title}",
-            f"Период      {_period_title(period)}",
             *_period_lines(period),
             f"Сотрудников {len(employees)}",
             *([f"Данные API  {available_rows_count} из {len(employees)}"] if unavailable_rows else []),
@@ -477,7 +486,7 @@ class StatisticsService:
                 key_value_rows(
                     [
                         ("Группа", title),
-                        ("Месяц", period_values["month"]),
+                        ("Период", period_values["period"]),
                         ("Даты", period_values["dates"]),
                         ("Сотрудников", len(employees)),
                         ("Стрижек", total_haircuts),
@@ -497,16 +506,38 @@ class StatisticsService:
             ),
         )
 
-    def _client_for_company(self, company) -> YClientsClient:
+    def _client_for_company(self, company: Company) -> YClientsClient:
+        return self._client(
+            company,
+            user_token=self._company_user_token(company),
+            partner_token=self._encryption.decrypt(company.encrypted_yclients_api_key),
+        )
+
+    async def _client_for_branch(self, company: Company, branch: Branch) -> YClientsClient:
+        user_token = self._company_user_token(company)
+        if branch.owner_telegram_user_id is not None:
+            franchisee = await self._franchisees.get_by_telegram_user_id(branch.owner_telegram_user_id)
+            if franchisee and not franchisee.is_blocked:
+                owner_token = self._encryption.decrypt(franchisee.encrypted_yclients_user_token)
+                if owner_token:
+                    user_token = owner_token
+        return self._client(
+            company,
+            user_token=user_token,
+            partner_token=self._encryption.decrypt(company.encrypted_yclients_api_key),
+        )
+
+    def _client(self, company: Company, *, user_token: str | None, partner_token: str | None) -> YClientsClient:
         return YClientsClient(
             base_url=self._settings.yclients_base_url_str,
-            partner_token=self._encryption.decrypt(company.encrypted_yclients_api_key)
-            or self._settings.yclients_partner_token,
-            user_token=self._encryption.decrypt(company.encrypted_yclients_user_token)
-            or self._settings.yclients_user_token,
+            partner_token=partner_token or self._settings.yclients_partner_token,
+            user_token=user_token,
             timeout_seconds=self._settings.yclients_timeout_seconds,
             product_max_pages=self._settings.yclients_product_max_pages,
         )
+
+    def _company_user_token(self, company: Company) -> str | None:
+        return self._encryption.decrypt(company.encrypted_yclients_user_token) or self._settings.yclients_user_token
 
     async def _upsert_daily_stat(self, employee: Employee, remote_stat: YClientsDailyStatistic) -> None:
         await self._daily_stats.upsert(
@@ -557,44 +588,138 @@ def yclients_data_error_hint(message: str) -> str:
 
 def _period_bounds(period: str) -> tuple[date, date]:
     today = date.today()
-    if period == "today":
-        return today, today
-    if period == "week":
-        return today - timedelta(days=today.weekday()), today
-    if period == "month":
-        return today.replace(day=1), today
-    if period == "previous_month":
-        current_month_start = today.replace(day=1)
-        previous_month_end = current_month_start - timedelta(days=1)
-        return previous_month_end.replace(day=1), previous_month_end
-    return today, today
+    kind, start = _period_kind_and_start(period, today=today)
+    if kind == "day":
+        end = start
+    elif kind == "week":
+        end = start + timedelta(days=6)
+    else:
+        end = _add_months(start, 1) - timedelta(days=1)
+    if end > today:
+        end = today
+    if start > today:
+        start = today
+        end = today
+    return start, end
 
 
 def _period_title(period: str) -> str:
+    kind, _ = _period_kind_and_start(period)
     return {
-        "today": "ЗА ДЕНЬ",
+        "day": "ЗА ДЕНЬ",
         "week": "ЗА НЕДЕЛЮ",
         "month": "ЗА МЕСЯЦ",
-        "previous_month": "ЗА ПРОШЛЫЙ МЕСЯЦ",
-    }.get(period, "ЗА ПЕРИОД")
+    }.get(kind, "ЗА ПЕРИОД")
+
+
+def canonical_period(period: str) -> str:
+    kind, start = _period_kind_and_start(period)
+    return _period_code(kind, start)
+
+
+def shifted_period(period: str, step: int) -> str:
+    today = date.today()
+    kind, start = _period_kind_and_start(period, today=today)
+    if kind == "day":
+        shifted = start + timedelta(days=step)
+    elif kind == "week":
+        shifted = start + timedelta(days=step * 7)
+    else:
+        shifted = _add_months(start, step)
+    current_kind_start = _period_kind_start(kind, today)
+    if shifted > current_kind_start:
+        shifted = current_kind_start
+    return _period_code(kind, shifted)
+
+
+def period_kind(period: str) -> str:
+    kind, _ = _period_kind_and_start(period)
+    return kind
 
 
 def _period_lines(period: str) -> list[str]:
     values = _period_values(period)
     return [
-        f"Месяц       {values['month']}",
+        f"Период      {values['period']}",
         f"Даты        {values['dates']}",
     ]
 
 
 def _period_values(period: str) -> dict[str, str]:
     start, end = _period_bounds(period)
-    month_label = (
-        f"{start:%m.%Y}"
-        if start.month == end.month and start.year == end.year
-        else f"{start:%m.%Y}-{end:%m.%Y}"
+    kind = period_kind(period)
+    if kind == "day":
+        period_label = f"{start.day} {_month_genitive(start)} {start.year}"
+    elif kind == "week":
+        period_label = f"неделя {_date_range_label(start, end)}"
+    elif start.month == end.month and start.year == end.year:
+        period_label = _month_label(start)
+    else:
+        period_label = f"{_month_label(start)} - {_month_label(end)}"
+    return {"month": period_label, "period": period_label, "dates": _date_range_label(start, end)}
+
+
+def _period_kind_and_start(period: str, *, today: date | None = None) -> tuple[str, date]:
+    today = today or date.today()
+    value = (period or "").strip().casefold()
+    if value == "today":
+        return "day", today
+    if value == "week":
+        return "week", _period_kind_start("week", today)
+    if value == "month":
+        return "month", _period_kind_start("month", today)
+    if value == "previous_month":
+        return "month", _add_months(_period_kind_start("month", today), -1)
+    if len(value) == 9 and value[0] in {"d", "w", "m"}:
+        try:
+            anchor = date(int(value[1:5]), int(value[5:7]), int(value[7:9]))
+        except ValueError:
+            return "day", today
+        kind = {"d": "day", "w": "week", "m": "month"}[value[0]]
+        return kind, _period_kind_start(kind, anchor)
+    return "day", today
+
+
+def _period_kind_start(kind: str, anchor: date) -> date:
+    if kind == "week":
+        return anchor - timedelta(days=anchor.weekday())
+    if kind == "month":
+        return anchor.replace(day=1)
+    return anchor
+
+
+def _period_code(kind: str, start: date) -> str:
+    prefix = {"day": "d", "week": "w", "month": "m"}[kind]
+    return f"{prefix}{start:%Y%m%d}"
+
+
+def _add_months(value: date, months: int) -> date:
+    month_index = value.year * 12 + value.month - 1 + months
+    year = month_index // 12
+    month = month_index % 12 + 1
+    return value.replace(year=year, month=month, day=1)
+
+
+def _month_label(value: date) -> str:
+    return f"{_MONTH_NAMES[value.month - 1]} {value.year}"
+
+
+def _month_genitive(value: date) -> str:
+    names = (
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
     )
-    return {"month": month_label, "dates": _date_range_label(start, end)}
+    return names[value.month - 1]
 
 
 def _date_range_label(start: date, end: date) -> str:

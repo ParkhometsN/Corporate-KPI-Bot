@@ -88,7 +88,7 @@ class KpiService:
             else None
         )
         summary = [
-            f"Период      {entity.month:%m.%Y}",
+            f"Период      {_month_label(entity.month)}",
             *_month_period_lines(entity.month),
             f"Сотрудник   {employee.full_name}",
             f"Грейд       {employee.category_title or 'не указан'}",
@@ -97,7 +97,7 @@ class KpiService:
             f"Товары      {monthly_stat.products_sold if monthly_stat else 0} / {money(monthly_stat.products_revenue if monthly_stat else Decimal('0'))}",
             f"KPI база    {money(entity.kpi_base_amount)}",
             f"Бонус       +{entity.earned_percent.quantize(Decimal('0.01'))}%",
-            f"Применится  {entity.applies_from_month:%m.%Y}",
+            f"Применится  {_month_label(entity.applies_from_month)}",
         ]
         progress = [
             f"Цель        {_kpi_goal_line(goal_amount, goal_percent)}",
@@ -139,7 +139,7 @@ class KpiService:
             table(
                 key_value_rows(
                     [
-                        ("Период", f"{entity.month:%m.%Y}"),
+                        ("Период", _month_label(entity.month)),
                         ("Даты", _month_period_values(entity.month)["dates"]),
                         ("Сотрудник", employee.full_name),
                         ("Филиал", employee.branch.name if employee.branch else "не указан"),
@@ -155,7 +155,7 @@ class KpiService:
                         ("Товары", f"{monthly_stat.products_sold if monthly_stat else 0} / {money(monthly_stat.products_revenue if monthly_stat else Decimal('0'))}"),
                         ("KPI база", money(entity.kpi_base_amount)),
                         ("Бонус", f"+{entity.earned_percent.quantize(Decimal('0.01'))}%"),
-                        ("Применится", f"{entity.applies_from_month:%m.%Y}"),
+                        ("Применится", _month_label(entity.applies_from_month)),
                     ]
                 )
             ),
@@ -211,7 +211,7 @@ class KpiService:
                 f"{employee.full_name[:18]:18} "
                 f"{money(entity.kpi_base_amount):>11} "
                 f"+{entity.earned_percent.quantize(Decimal('0.01')):>5}% "
-                f"{entity.applies_from_month:%m.%Y}"
+                f"{_month_label(entity.applies_from_month)}"
             )
 
         parts = [
@@ -219,7 +219,7 @@ class KpiService:
             pre(
                 [
                     f"Группа       {title}",
-                    f"Период      {month:%m.%Y}",
+                    f"Период      {_month_label(month)}",
                     *_month_period_lines(month),
                     f"Сотрудников {len(employees)}",
                     f"База KPI    {money(total_base)}",
@@ -255,7 +255,7 @@ class KpiService:
                 employee.full_name,
                 money(entity.kpi_base_amount),
                 f"+{entity.earned_percent.quantize(Decimal('0.01'))}%",
-                f"{entity.applies_from_month:%m.%Y}",
+                _month_label(entity.applies_from_month),
             ]
             for employee, entity in sorted(rows, key=lambda item: item[1].kpi_base_amount, reverse=True)
         ]
@@ -265,7 +265,7 @@ class KpiService:
                 key_value_rows(
                     [
                         ("Группа", title),
-                        ("Период", f"{month:%m.%Y}"),
+                        ("Период", _month_label(month)),
                         ("Даты", _month_period_values(month)["dates"]),
                         ("Сотрудников", len(employees)),
                         ("База KPI", money(total_base)),
@@ -326,6 +326,24 @@ def _month_period_values(month: date) -> dict[str, str]:
     else:
         end = _next_month(start) - date.resolution
     return {"dates": _date_range_label(start, end)}
+
+
+def _month_label(month: date) -> str:
+    names = (
+        "январь",
+        "февраль",
+        "март",
+        "апрель",
+        "май",
+        "июнь",
+        "июль",
+        "август",
+        "сентябрь",
+        "октябрь",
+        "ноябрь",
+        "декабрь",
+    )
+    return f"{names[month.month - 1]} {month.year}"
 
 
 def _date_range_label(start: date, end: date) -> str:

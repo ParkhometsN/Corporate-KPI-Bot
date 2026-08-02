@@ -46,6 +46,7 @@ class TelegramUserRepository(BaseRepository[TelegramUser]):
             user.username = username
             user.first_name = first_name
             user.last_name = last_name
+            user.is_active = True
             if role is not None:
                 user.role = role
         await self.session.flush()

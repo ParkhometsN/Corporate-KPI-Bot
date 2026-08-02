@@ -91,6 +91,11 @@ class FranchiseeRepository(BaseRepository[Franchisee]):
         await self.session.flush()
         return franchisee
 
+    async def update_yclients_user_token(self, franchisee: Franchisee, encrypted_user_token: str | None) -> Franchisee:
+        franchisee.encrypted_yclients_user_token = encrypted_user_token
+        await self.session.flush()
+        return franchisee
+
     async def update_global_permissions(
         self,
         franchisee: Franchisee,
@@ -117,6 +122,16 @@ class FranchiseInviteRepository(BaseRepository[FranchiseInvite]):
             select(FranchiseInvite)
             .where(FranchiseInvite.code_hash == code_hash, FranchiseInvite.status == "active")
             .options(selectinload(FranchiseInvite.franchisee))
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_hash(self, code_hash: str) -> FranchiseInvite | None:
+        result = await self.session.execute(
+            select(FranchiseInvite)
+            .where(FranchiseInvite.code_hash == code_hash)
+            .options(selectinload(FranchiseInvite.franchisee))
+            .order_by(FranchiseInvite.created_at.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 

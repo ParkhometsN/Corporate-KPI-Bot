@@ -13,8 +13,8 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import Settings
-from app.models import Company, Employee
-from app.repositories import CompanyRepository, GradeRuleRepository, ServiceRepository
+from app.models import Branch, Company, Employee
+from app.repositories import CompanyRepository, FranchiseeRepository, GradeRuleRepository, ServiceRepository
 from app.services.security import EncryptionService
 from app.utils.exceptions import AppError
 from app.utils.telegram_formatting import blockquote, bold, money, pre
@@ -43,6 +43,7 @@ class CatalogService:
     def __init__(self, session: AsyncSession, settings: Settings) -> None:
         self._settings = settings
         self._companies = CompanyRepository(session)
+        self._franchisees = FranchiseeRepository(session)
         self._grade_rules = GradeRuleRepository(session)
         self._services = ServiceRepository(session)
         self._encryption = EncryptionService(settings)
@@ -197,14 +198,31 @@ class CatalogService:
         cached_products = _cached_products(branch_id, ttl_seconds=self._settings.yclients_catalog_cache_ttl_seconds)
         if cached_products is not None:
             return cached_products
-        client = self._client_for_company(company)
+        client = await self._client_for_branch(company, employee.branch)
         products = await client.list_products(branch_id)
         _PRODUCTS_CACHE[branch_id] = (monotonic(), products)
         return products
 
     def _client_for_company(self, company: Company) -> YClientsClient:
-        partner_token = self._encryption.decrypt(company.encrypted_yclients_api_key)
-        user_token = self._encryption.decrypt(company.encrypted_yclients_user_token) or self._settings.yclients_user_token
+        return self._client(
+            user_token=self._company_user_token(company),
+            partner_token=self._encryption.decrypt(company.encrypted_yclients_api_key),
+        )
+
+    async def _client_for_branch(self, company: Company, branch: Branch) -> YClientsClient:
+        user_token = self._company_user_token(company)
+        if branch.owner_telegram_user_id is not None:
+            franchisee = await self._franchisees.get_by_telegram_user_id(branch.owner_telegram_user_id)
+            if franchisee and not franchisee.is_blocked:
+                owner_token = self._encryption.decrypt(franchisee.encrypted_yclients_user_token)
+                if owner_token:
+                    user_token = owner_token
+        return self._client(
+            user_token=user_token,
+            partner_token=self._encryption.decrypt(company.encrypted_yclients_api_key),
+        )
+
+    def _client(self, *, user_token: str | None, partner_token: str | None) -> YClientsClient:
         return YClientsClient(
             base_url=self._settings.yclients_base_url_str,
             partner_token=partner_token or self._settings.yclients_partner_token,
@@ -212,6 +230,9 @@ class CatalogService:
             timeout_seconds=self._settings.yclients_timeout_seconds,
             product_max_pages=self._settings.yclients_product_max_pages,
         )
+
+    def _company_user_token(self, company: Company) -> str | None:
+        return self._encryption.decrypt(company.encrypted_yclients_user_token) or self._settings.yclients_user_token
 
 
 def _price_range(price_min: Decimal, price_max: Decimal) -> str:

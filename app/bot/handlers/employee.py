@@ -49,7 +49,7 @@ async def employee_statistics(message: Message, services: ServiceContainer) -> N
         return RichMessageResult(
             rich_message=await services.statistics.employee_stats_rich_message(employee, "month"),
             fallback_text=await services.statistics.employee_stats_text(employee, "month", refresh=False),
-            reply_markup=stats_period_keyboard(),
+            reply_markup=stats_period_keyboard("month"),
         )
 
     await answer_with_loading(
@@ -77,7 +77,7 @@ async def employee_statistics_period(callback: CallbackQuery, services: ServiceC
         return RichMessageResult(
             rich_message=await services.statistics.employee_stats_rich_message(employee, period),
             fallback_text=await services.statistics.employee_stats_text(employee, period, refresh=False),
-            reply_markup=stats_period_keyboard(),
+            reply_markup=stats_period_keyboard(period),
         )
 
     await edit_with_loading(

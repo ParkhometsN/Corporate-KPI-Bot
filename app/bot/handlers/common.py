@@ -4,11 +4,19 @@ from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
-from app.bot.keyboards.admin import admin_main_keyboard, back_to_employees_keyboard
+from app.bot.keyboards.admin import (
+    admin_main_keyboard,
+    back_to_employees_keyboard,
+    back_to_franchisees_keyboard,
+    franchisee_main_keyboard,
+    yclients_login_cancel_keyboard,
+)
 from app.bot.keyboards.employee import employee_main_keyboard
 from app.bot.keyboards.common import remove_keyboard
+from app.bot.states.admin import AdminYClientsLoginStates
 from app.bot.states.employee import EmployeeConnectionStates
 from app.services.factory import ServiceContainer
+from app.utils.telegram_formatting import blockquote, bold
 
 router = Router(name="common")
 
@@ -19,29 +27,44 @@ async def start(message: Message, state: FSMContext, services: ServiceContainer)
     if await services.admin.is_manager(message.from_user.id):
         await message.answer(
             await services.admin.dashboard_text(message.from_user.id),
-            reply_markup=admin_main_keyboard(),
-        )
-        return
-    employee = await services.connection.get_employee_by_telegram_id(message.from_user.id)
-    if employee:
-        await message.answer(
-            f"Здравствуйте, {employee.full_name}.\nВыберите раздел:",
-            reply_markup=employee_main_keyboard(),
+            reply_markup=admin_main_keyboard()
+            if await services.admin.is_admin(message.from_user.id)
+            else franchisee_main_keyboard(),
         )
         return
     payload = _start_payload(message.text)
     if payload:
         if payload.startswith("fr_"):
             franchisee = await services.admin.bind_franchisee(message.from_user, payload)
+            await _notify_franchise_connection_success(message, services, payload, franchisee)
+            await state.set_state(AdminYClientsLoginStates.waiting_login)
             await message.answer(
-                f"Готово, вы подключены как руководитель филиала: {franchisee.title}.",
-                reply_markup=admin_main_keyboard(),
+                "\n\n".join(
+                    [
+                        bold("РУКОВОДИТЕЛЬ ФИЛИАЛА ПОДКЛЮЧЁН"),
+                        blockquote(
+                            [
+                                f"Профиль: {franchisee.title}",
+                                "Теперь войдите в YCLIENTS, чтобы бот мог видеть ваши филиалы, сотрудников и статистику.",
+                            ]
+                        ),
+                        _yclients_login_prompt_text(),
+                    ]
+                ),
+                reply_markup=yclients_login_cancel_keyboard(),
             )
             return
         employee = await services.connection.bind_employee(message.from_user, payload)
         await _notify_admin_connection_success(message, services, payload, employee)
         await message.answer(
             f"Готово, Telegram подключён к сотруднику {employee.full_name}.",
+            reply_markup=employee_main_keyboard(),
+        )
+        return
+    employee = await services.connection.get_employee_by_telegram_id(message.from_user.id)
+    if employee:
+        await message.answer(
+            f"Здравствуйте, {employee.full_name}.\nВыберите раздел:",
             reply_markup=employee_main_keyboard(),
         )
         return
@@ -95,6 +118,47 @@ async def _notify_admin_connection_success(
         )
     except TelegramBadRequest:
         return
+
+
+async def _notify_franchise_connection_success(
+    message: Message,
+    services: ServiceContainer,
+    code: str,
+    franchisee,
+) -> None:
+    admin_message = await services.admin.franchise_invite_admin_message(code)
+    if admin_message is None:
+        return
+    try:
+        await message.bot.edit_message_text(
+            "\n".join(
+                [
+                    "РУКОВОДИТЕЛЬ ФИЛИАЛА ПОДКЛЮЧЁН",
+                    "",
+                    f"Профиль: {franchisee.title}",
+                    "Статус: Telegram успешно подключён.",
+                ]
+            ),
+            chat_id=admin_message.chat_id,
+            message_id=admin_message.message_id,
+            reply_markup=back_to_franchisees_keyboard(),
+        )
+    except TelegramBadRequest:
+        return
+
+
+def _yclients_login_prompt_text() -> str:
+    return "\n\n".join(
+        [
+            bold("ВХОД В YCLIENTS"),
+            blockquote(
+                [
+                    "Введите телефон или email от аккаунта YCLIENTS.",
+                    "Следующим сообщением бот попросит пароль и сохранит только User token.",
+                ]
+            ),
+        ]
+    )
 
 
 def _start_payload(text: str | None) -> str | None:

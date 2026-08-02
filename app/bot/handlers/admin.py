@@ -20,6 +20,7 @@ from app.bot.keyboards.admin import (
     admin_settings_keyboard,
     available_branches_keyboard,
     back_to_employees_keyboard,
+    back_to_franchisees_keyboard,
     branch_delete_confirm_keyboard,
     branch_dashboard_keyboard,
     branch_stats_period_keyboard,
@@ -29,8 +30,11 @@ from app.bot.keyboards.admin import (
     broadcast_confirm_keyboard,
     branches_keyboard,
     employee_admin_keyboard,
+    employee_stats_period_keyboard,
     employees_keyboard,
     franchise_delete_confirm_keyboard,
+    franchisee_main_keyboard,
+    franchisee_settings_keyboard,
     franchisee_keyboard,
     franchisees_keyboard,
     team_stats_period_keyboard,
@@ -76,7 +80,7 @@ async def admin_start(message: Message, state: FSMContext, services: ServiceCont
         await state.clear()
         await message.answer(
             await services.admin.dashboard_text(message.from_user.id),
-            reply_markup=admin_main_keyboard(),
+            reply_markup=await _main_keyboard_for_user(services, message.from_user.id),
         )
         return
     if not await services.admin.has_registered_admins():
@@ -108,7 +112,7 @@ async def admin_password(message: Message, state: FSMContext, services: ServiceC
     await _try_delete(message)
     await state.clear()
     await message.answer(
-        await services.admin.dashboard_text(),
+        await services.admin.dashboard_text(message.from_user.id),
         reply_markup=admin_main_keyboard(),
     )
 
@@ -129,7 +133,10 @@ async def admin_dashboard(callback: CallbackQuery, state: FSMContext, services: 
 async def admin_dashboard_button(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     await services.admin.ensure_manager(message.from_user.id)
     await state.clear()
-    await message.answer(await services.admin.dashboard_text(message.from_user.id), reply_markup=admin_main_keyboard())
+    await message.answer(
+        await services.admin.dashboard_text(message.from_user.id),
+        reply_markup=await _main_keyboard_for_user(services, message.from_user.id),
+    )
 
 
 @router.message(StateFilter(None), F.text.in_({"Филиалы", "🏢 Филиалы"}))
@@ -176,7 +183,7 @@ async def admin_broadcast_button(message: Message, state: FSMContext, services: 
                     blockquote("Сначала добавьте филиал и синхронизируйте сотрудников."),
                 ]
             ),
-            reply_markup=admin_main_keyboard(),
+            reply_markup=await _main_keyboard_for_user(services, message.from_user.id),
         )
         return
     if len(branches) == 1:
@@ -213,8 +220,8 @@ async def admin_kpi_button(message: Message, state: FSMContext, services: Servic
 
 @router.message(StateFilter(None), F.text == "Настройки руководителя")
 async def admin_settings_button(message: Message, services: ServiceContainer) -> None:
-    await services.admin.ensure_admin(message.from_user.id)
-    await message.answer(bold("НАСТРОЙКИ"), reply_markup=admin_settings_keyboard())
+    await services.admin.ensure_manager(message.from_user.id)
+    await message.answer(bold("НАСТРОЙКИ"), reply_markup=await _settings_keyboard_for_user(services, message.from_user.id))
 
 
 @router.message(StateFilter(None), F.text.in_({"Франчайзи", "Руководители филиалов"}))
@@ -230,12 +237,12 @@ async def admin_franchisees_button(message: Message, state: FSMContext, services
 
 @router.message(StateFilter(None), F.text.in_({"Проверка подключения", "✅ Проверка подключения"}))
 async def admin_check_connection_button(message: Message, services: ServiceContainer) -> None:
-    await services.admin.ensure_admin(message.from_user.id)
+    await services.admin.ensure_manager(message.from_user.id)
 
     async def check_connection():
-        text = await services.admin.check_connection_text()
+        text = await services.admin.check_connection_text(message.from_user.id)
         try:
-            available, existing_ids = await services.admin.available_branches()
+            available, existing_ids = await services.admin.available_branches(message.from_user.id)
             keyboard = available_branches_keyboard(available, existing_ids)
         except Exception:
             keyboard = None
@@ -264,9 +271,9 @@ async def admin_available_branches(callback: CallbackQuery, services: ServiceCon
 
     async def load_available_branches():
         try:
-            available, existing_ids = await services.admin.available_branches()
+            available, existing_ids = await services.admin.available_branches(callback.from_user.id)
         except Exception:
-            return await services.admin.check_connection_text(), None
+            return await services.admin.check_connection_text(callback.from_user.id), None
         text = "\n\n".join(
             [
                 bold("ДОСТУПНЫЕ ФИЛИАЛЫ YCLIENTS"),
@@ -374,7 +381,7 @@ async def admin_yclients_login_start(
     state: FSMContext,
     services: ServiceContainer,
 ) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     if not await services.admin.is_yclients_configured():
         await _safe_edit_text(
             callback.message,
@@ -384,7 +391,7 @@ async def admin_yclients_login_start(
                     blockquote("Сначала сохраните API key и Partner ID. После этого бот попросит логин и пароль."),
                 ]
             ),
-            reply_markup=admin_settings_keyboard(),
+            reply_markup=await _settings_keyboard_for_user(services, callback.from_user.id),
         )
         await callback.answer()
         return
@@ -404,9 +411,13 @@ async def admin_yclients_login_cancel(
     state: FSMContext,
     services: ServiceContainer,
 ) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     await state.clear()
-    await _safe_edit_text(callback.message, bold("НАСТРОЙКИ"), reply_markup=admin_settings_keyboard())
+    await _safe_edit_text(callback.message, bold("ВХОД В YCLIENTS ОТМЕНЕН"), reply_markup=None)
+    await callback.message.answer(
+        await services.admin.dashboard_text(callback.from_user.id),
+        reply_markup=await _main_keyboard_for_user(services, callback.from_user.id),
+    )
     await callback.answer()
 
 
@@ -416,7 +427,7 @@ async def admin_yclients_login_text(
     state: FSMContext,
     services: ServiceContainer,
 ) -> None:
-    await services.admin.ensure_admin(message.from_user.id)
+    await services.admin.ensure_manager(message.from_user.id)
     login = (message.text or "").strip()
     if not login:
         await message.answer("Введите телефон или email от аккаунта YCLIENTS.", reply_markup=yclients_login_cancel_keyboard())
@@ -446,7 +457,7 @@ async def admin_yclients_password_text(
     state: FSMContext,
     services: ServiceContainer,
 ) -> None:
-    await services.admin.ensure_admin(message.from_user.id)
+    await services.admin.ensure_manager(message.from_user.id)
     data = await state.get_data()
     login = str(data.get("yclients_login") or "").strip()
     password = message.text or ""
@@ -460,7 +471,11 @@ async def admin_yclients_password_text(
         return
 
     async def connect_yclients():
-        await services.admin.setup_yclients_login_password(login=login, password=password)
+        await services.admin.setup_yclients_login_password(
+            login=login,
+            password=password,
+            telegram_id=message.from_user.id,
+        )
         await state.clear()
         text = "\n\n".join(
             [
@@ -471,10 +486,13 @@ async def admin_yclients_password_text(
                         "Статистика, записи, финансы и товары будут запрашиваться с правами этого аккаунта.",
                     ]
                 ),
-                await services.admin.check_connection_text(),
+                await services.admin.check_connection_text(message.from_user.id),
             ]
         )
-        await message.answer(await services.admin.dashboard_text(), reply_markup=admin_main_keyboard())
+        await message.answer(
+            await services.admin.dashboard_text(message.from_user.id),
+            reply_markup=await _main_keyboard_for_user(services, message.from_user.id),
+        )
         return text, None
 
     try:
@@ -648,8 +666,7 @@ async def admin_franchise_invite(callback: CallbackQuery, services: ServiceConta
     code = await services.admin.generate_franchise_invite(callback.from_user.id)
     bot_info = await callback.bot.get_me()
     link = f"https://t.me/{bot_info.username}?start={code}"
-    franchisees = await services.admin.list_franchisees()
-    await callback.message.answer(
+    sent_message = await callback.message.answer(
         "\n\n".join(
             [
                 bold("ССЫЛКА ДЛЯ РУКОВОДИТЕЛЯ ФИЛИАЛА"),
@@ -663,7 +680,12 @@ async def admin_franchise_invite(callback: CallbackQuery, services: ServiceConta
                 ),
             ]
         ),
-        reply_markup=franchisees_keyboard(franchisees),
+        reply_markup=back_to_franchisees_keyboard(),
+    )
+    await services.admin.attach_franchise_invite_message(
+        code,
+        chat_id=sent_message.chat.id,
+        message_id=sent_message.message_id,
     )
     await callback.answer()
 
@@ -1079,11 +1101,11 @@ async def admin_broadcast_message_action(
 
 
 @router.message(AdminBroadcastStates.waiting_message_text, Command("cancel"))
-async def admin_broadcast_message_cancel(message: Message, state: FSMContext) -> None:
+async def admin_broadcast_message_cancel(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     await state.clear()
     await message.answer(
         "\n\n".join([bold("РАССЫЛКА ОТМЕНЕНА"), blockquote("Действие не отправлено сотрудникам.")]),
-        reply_markup=admin_main_keyboard(),
+        reply_markup=await _main_keyboard_for_user(services, message.from_user.id),
     )
 
 
@@ -1369,7 +1391,12 @@ async def employee_admin_callback(callback: CallbackQuery, services: ServiceCont
     await _ensure_manager(callback, services)
     parts = callback.data.split(":")
     action = parts[1]
-    employee_id = UUID(parts[2] if len(parts) > 2 else parts[1])
+    if action == "stats":
+        period = parts[2] if len(parts) >= 4 else "month"
+        employee_id = UUID(parts[3] if len(parts) >= 4 else parts[2])
+    else:
+        period = "month"
+        employee_id = UUID(parts[2] if len(parts) > 2 else parts[1])
     employee = await services.admin.get_visible_employee(employee_id, callback.from_user.id)
 
     if action == "code":
@@ -1399,18 +1426,19 @@ async def employee_admin_callback(callback: CallbackQuery, services: ServiceCont
 
         async def load_employee_stats() -> RichMessageResult:
             try:
-                await services.statistics.refresh_period(employee, "month")
+                await services.statistics.refresh_period(employee, period)
             except Exception:
                 pass
             return RichMessageResult(
-                rich_message=await services.statistics.employee_stats_rich_message(employee, "month"),
-                fallback_text=await services.statistics.employee_stats_text(employee, "month", refresh=False),
+                rich_message=await services.statistics.employee_stats_rich_message(employee, period),
+                fallback_text=await services.statistics.employee_stats_text(employee, period, refresh=False),
+                reply_markup=employee_stats_period_keyboard(employee.id, period),
             )
 
         await answer_with_loading(
             callback.message,
             title="ЗАГРУЗКА СТАТИСТИКИ",
-            detail="Обновляю месяц сотрудника.",
+            detail="Обновляю период сотрудника.",
             producer=load_employee_stats,
         )
         return
@@ -1421,14 +1449,14 @@ async def employee_admin_callback(callback: CallbackQuery, services: ServiceCont
 
 @router.callback_query(F.data.in_({"admin:check_connection", "admin:settings", "admin:statistics_settings"}))
 async def admin_misc(callback: CallbackQuery, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     if callback.data == "admin:check_connection":
         await callback.answer()
 
         async def check_connection():
-            text = await services.admin.check_connection_text()
+            text = await services.admin.check_connection_text(callback.from_user.id)
             try:
-                available, existing_ids = await services.admin.available_branches()
+                available, existing_ids = await services.admin.available_branches(callback.from_user.id)
                 keyboard = available_branches_keyboard(available, existing_ids)
             except Exception:
                 keyboard = None
@@ -1456,7 +1484,7 @@ async def admin_misc(callback: CallbackQuery, services: ServiceContainer) -> Non
         await _safe_edit_text(
             callback.message,
             bold("НАСТРОЙКИ"),
-            reply_markup=admin_settings_keyboard(),
+            reply_markup=await _settings_keyboard_for_user(services, callback.from_user.id),
         )
     else:
         await _safe_edit_text(
@@ -1473,6 +1501,18 @@ async def _ensure_admin(callback: CallbackQuery, services: ServiceContainer) -> 
 
 async def _ensure_manager(callback: CallbackQuery, services: ServiceContainer) -> None:
     await services.admin.ensure_manager(callback.from_user.id)
+
+
+async def _settings_keyboard_for_user(services: ServiceContainer, telegram_id: int):
+    if await services.admin.is_admin(telegram_id):
+        return admin_settings_keyboard()
+    return franchisee_settings_keyboard()
+
+
+async def _main_keyboard_for_user(services: ServiceContainer, telegram_id: int):
+    if await services.admin.is_admin(telegram_id):
+        return admin_main_keyboard()
+    return franchisee_main_keyboard()
 
 
 async def _try_delete(message: Message) -> None:

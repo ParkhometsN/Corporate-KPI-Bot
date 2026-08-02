@@ -1,6 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from app.models import NotificationSettings
+from app.services.statistics import canonical_period, period_kind, shifted_period
 
 
 def employee_main_keyboard() -> ReplyKeyboardMarkup:
@@ -16,14 +17,25 @@ def employee_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def stats_period_keyboard() -> InlineKeyboardMarkup:
+def stats_period_keyboard(selected_period: str = "month") -> InlineKeyboardMarkup:
+    current = canonical_period(selected_period)
+    kind = period_kind(current)
+
+    def marker(expected_kind: str) -> str:
+        return "✅ " if kind == expected_kind else ""
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Сегодня", callback_data="empstats:today"),
-                InlineKeyboardButton(text="Неделя", callback_data="empstats:week"),
-                InlineKeyboardButton(text="Месяц", callback_data="empstats:month"),
-            ]
+                InlineKeyboardButton(text="‹", callback_data=f"empstats:{shifted_period(current, -1)}"),
+                InlineKeyboardButton(text="Обновить", callback_data=f"empstats:{current}"),
+                InlineKeyboardButton(text="›", callback_data=f"empstats:{shifted_period(current, 1)}"),
+            ],
+            [
+                InlineKeyboardButton(text=f"{marker('day')}День", callback_data="empstats:today"),
+                InlineKeyboardButton(text=f"{marker('week')}Неделя", callback_data="empstats:week"),
+                InlineKeyboardButton(text=f"{marker('month')}Месяц", callback_data="empstats:month"),
+            ],
         ]
     )
 
