@@ -1,9 +1,12 @@
+from datetime import date
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.handlers.loading import RichMessageResult, RichMessagesResult, answer_with_loading, edit_with_loading
 from app.bot.keyboards.employee import (
     employee_main_keyboard,
+    kpi_month_keyboard,
     notification_settings_keyboard,
     stats_period_keyboard,
 )
@@ -93,19 +96,51 @@ async def employee_kpi(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
 
     async def load_kpi() -> RichMessageResult:
+        period = "month"
+        month = _month_from_period(period)
         try:
-            await services.statistics.refresh_period(employee, "month")
+            await services.statistics.refresh_period(employee, period)
         except Exception:
             pass
         return RichMessageResult(
-            rich_message=await services.kpi.employee_kpi_rich_message(employee),
-            fallback_text=await services.kpi.employee_kpi_text(employee, refresh=False),
+            rich_message=await services.kpi.employee_kpi_rich_message(employee, month=month),
+            fallback_text=await services.kpi.employee_kpi_text(employee, month=month, refresh=False),
+            reply_markup=kpi_month_keyboard(period),
         )
 
     await answer_with_loading(
         message,
         title="ЗАГРУЗКА KPI",
         detail="Обновляю месяц и пересчитываю процент.",
+        producer=load_kpi,
+    )
+
+
+@router.callback_query(F.data.startswith("empkpi:"))
+async def employee_kpi_month(callback: CallbackQuery, services: ServiceContainer) -> None:
+    employee = await services.connection.get_employee_by_telegram_id(callback.from_user.id)
+    if employee is None:
+        await callback.answer("Сначала подключитесь через /start.", show_alert=True)
+        return
+    period = callback.data.split(":", maxsplit=1)[1]
+    month = _month_from_period(period)
+    await callback.answer()
+
+    async def load_kpi() -> RichMessageResult:
+        try:
+            await services.statistics.refresh_period(employee, period)
+        except Exception:
+            pass
+        return RichMessageResult(
+            rich_message=await services.kpi.employee_kpi_rich_message(employee, month=month),
+            fallback_text=await services.kpi.employee_kpi_text(employee, month=month, refresh=False),
+            reply_markup=kpi_month_keyboard(period),
+        )
+
+    await edit_with_loading(
+        callback.message,
+        title="ЗАГРУЗКА KPI",
+        detail="Обновляю выбранный месяц.",
         producer=load_kpi,
     )
 
@@ -211,3 +246,13 @@ async def _require_employee(message: Message, services: ServiceContainer):
     if employee is None:
         raise AccessDeniedError("Сначала подключитесь через /start.")
     return employee
+
+
+def _month_from_period(period: str) -> date:
+    value = (period or "").strip()
+    if len(value) == 9 and value.startswith("m"):
+        try:
+            return date(int(value[1:5]), int(value[5:7]), 1)
+        except ValueError:
+            pass
+    return date.today().replace(day=1)

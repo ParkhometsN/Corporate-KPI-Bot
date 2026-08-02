@@ -40,6 +40,24 @@ def stats_period_keyboard(selected_period: str = "month") -> InlineKeyboardMarku
     )
 
 
+def kpi_month_keyboard(selected_period: str = "month") -> InlineKeyboardMarkup:
+    current = _month_period(selected_period)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="‹", callback_data=f"empkpi:{shifted_period(current, -1)}"),
+                InlineKeyboardButton(text="Обновить", callback_data=f"empkpi:{current}"),
+                InlineKeyboardButton(text="›", callback_data=f"empkpi:{shifted_period(current, 1)}"),
+            ],
+        ]
+    )
+
+
+def _month_period(selected_period: str) -> str:
+    current = canonical_period(selected_period)
+    return current if current.startswith("m") else canonical_period("month")
+
+
 def notification_settings_keyboard(settings: NotificationSettings | None = None) -> InlineKeyboardMarkup:
     def label(title: str, field_name: str) -> str:
         if settings is None:
