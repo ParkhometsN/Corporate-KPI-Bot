@@ -19,7 +19,7 @@ class TelegramUser(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
 
-    employee = relationship("Employee", back_populates="telegram_user", uselist=False)
+    employees = relationship("Employee", back_populates="telegram_user")
     notifications = relationship(
         "NotificationSettings",
         back_populates="telegram_user",

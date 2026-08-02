@@ -10,6 +10,7 @@ def developer_main_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Панель руководителя", callback_data="dev:admin")],
             [InlineKeyboardButton(text="Войти как барбер", callback_data="dev:employees")],
+            [InlineKeyboardButton(text="Выйти из dev-режима", callback_data="dev:logout")],
         ]
     )
 
@@ -38,7 +39,7 @@ def developer_employee_keyboard(employee: Employee) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="KPI", callback_data=f"dev:kpi:{employee_id}")],
             [InlineKeyboardButton(text="Grade Up", callback_data=f"dev:grade:{employee_id}")],
             [InlineKeyboardButton(text="Услуги", callback_data=f"dev:services:{employee_id}")],
-            [InlineKeyboardButton(text="Продажи", callback_data=f"dev:products:{employee_id}")],
+            [InlineKeyboardButton(text="Товары", callback_data=f"dev:products:{employee_id}")],
             [InlineKeyboardButton(text="Регламент", callback_data=f"dev:regulation:{employee_id}")],
             [InlineKeyboardButton(text="Назад к барберам", callback_data="dev:employees")],
         ]

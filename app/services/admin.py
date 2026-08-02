@@ -80,6 +80,18 @@ class AdminService:
             role=Role.ADMIN,
         )
 
+    async def developer_previous_role(self, telegram_id: int) -> Role | None:
+        user = await self._telegram_users.get_by_telegram_id(telegram_id)
+        return user.role if user and user.is_active else None
+
+    async def restore_developer_role(self, telegram_id: int, role: Role | None) -> TelegramUser | None:
+        user = await self._telegram_users.get_by_telegram_id(telegram_id)
+        if user is None:
+            return None
+        if role is None:
+            role = Role.EMPLOYEE
+        return await self._telegram_users.update_role(user, role)
+
     async def has_registered_admins(self) -> bool:
         return await self._telegram_users.has_active_admins()
 

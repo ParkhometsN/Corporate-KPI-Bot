@@ -103,11 +103,11 @@ class EmployeeConnectionService:
     async def get_employee_by_telegram_id(self, telegram_id: int) -> Employee | None:
         return await self._employees.get_by_telegram_id(telegram_id)
 
+    async def get_employees_by_telegram_id(self, telegram_id: int) -> list[Employee]:
+        return await self._employees.list_by_telegram_id(telegram_id)
+
     async def get_employee(self, employee_id) -> Employee | None:
         return await self._employees.get_full(employee_id)
-
-    async def get_related_employees(self, employee: Employee) -> list[Employee]:
-        return await self._employees.list_related_active(employee)
 
     async def disconnect_employee(self, employee_id) -> Employee:
         employee = await self._employees.get(employee_id)

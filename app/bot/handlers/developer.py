@@ -14,16 +14,22 @@ from app.bot.keyboards.developer import (
     developer_employees_keyboard,
     developer_main_keyboard,
 )
+from app.models import Role
 from app.services.factory import ServiceContainer
 from app.utils.telegram_formatting import blockquote, bold, pre
 
 router = Router(name="developer")
 _DEVELOPER_SESSION_IDS: set[int] = set()
+_DEVELOPER_PREVIOUS_ROLES: dict[int, Role | None] = {}
 
 
 @router.message(Command("adminparkhometsn"))
 async def developer_start(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     await state.clear()
+    _DEVELOPER_PREVIOUS_ROLES.setdefault(
+        message.from_user.id,
+        await services.admin.developer_previous_role(message.from_user.id),
+    )
     _DEVELOPER_SESSION_IDS.add(message.from_user.id)
     await services.admin.grant_developer_admin(message.from_user)
     await message.answer(
@@ -41,6 +47,13 @@ async def developer_start(message: Message, state: FSMContext, services: Service
     )
 
 
+@router.message(Command("devexit"))
+async def developer_logout_command(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    await state.clear()
+    await _developer_logout(message.from_user.id, services)
+    await message.answer("Dev-режим выключен.")
+
+
 @router.callback_query(F.data.in_({"dev:home", "dev:admin"}))
 async def developer_home(callback: CallbackQuery, services: ServiceContainer) -> None:
     if not await _ensure_developer(callback, services):
@@ -56,6 +69,15 @@ async def developer_home(callback: CallbackQuery, services: ServiceContainer) ->
         "\n\n".join([bold("DEV-ПАНЕЛЬ"), blockquote("Выберите режим просмотра.")]),
         reply_markup=developer_main_keyboard(),
     )
+
+
+@router.callback_query(F.data == "dev:logout")
+async def developer_logout(callback: CallbackQuery, services: ServiceContainer) -> None:
+    if not await _ensure_developer(callback, services):
+        return
+    await _developer_logout(callback.from_user.id, services)
+    await callback.answer("Dev-режим выключен.")
+    await callback.message.edit_text("Dev-режим выключен.")
 
 
 @router.callback_query(F.data == "dev:employees")
@@ -92,8 +114,7 @@ async def developer_employee_stats_start(callback: CallbackQuery, services: Serv
     if not await _ensure_developer(callback, services):
         return
     employee = await services.admin.get_employee(UUID(callback.data.split(":")[3]))
-    related_employees = await services.connection.get_related_employees(employee)
-    related_employees = _current_employee_first(related_employees, employee)
+    related_employees = await _developer_employee_scope(services, employee)
     await callback.answer()
     await _show_developer_stats(callback, services, related_employees, "month", scope="e", scope_id=str(employee.id))
 
@@ -104,7 +125,7 @@ async def developer_employee_stats_period(callback: CallbackQuery, services: Ser
         return
     period, scope, scope_id = _parse_developer_stats_callback(callback.data)
     root_employee = await services.admin.get_employee(UUID(scope_id))
-    related_employees = _current_employee_first(await services.connection.get_related_employees(root_employee), root_employee)
+    related_employees = await _developer_employee_scope(services, root_employee)
     scope_employees = related_employees if scope == "a" else [employee for employee in related_employees if str(employee.id) == scope_id]
     if not scope_employees:
         await callback.answer("Сотрудник не найден.", show_alert=True)
@@ -224,6 +245,21 @@ async def _ensure_developer(callback: CallbackQuery, services: ServiceContainer)
         return True
     await callback.answer("Сначала откройте /adminparkhometsn.", show_alert=True)
     return False
+
+
+async def _developer_logout(telegram_id: int, services: ServiceContainer) -> None:
+    _DEVELOPER_SESSION_IDS.discard(telegram_id)
+    previous_role = _DEVELOPER_PREVIOUS_ROLES.pop(telegram_id, None)
+    await services.admin.restore_developer_role(telegram_id, previous_role)
+
+
+async def _developer_employee_scope(services: ServiceContainer, employee) -> list:
+    if employee.telegram_user is None:
+        return [employee]
+    employees = await services.connection.get_employees_by_telegram_id(employee.telegram_user.telegram_id)
+    if employee.id not in {item.id for item in employees}:
+        employees.append(employee)
+    return _current_employee_first(employees, employee)
 
 
 def _developer_employee_text(employee) -> str:

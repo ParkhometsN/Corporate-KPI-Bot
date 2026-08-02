@@ -30,19 +30,6 @@ class EmployeeRepository(BaseRepository[Employee]):
         )
         return list(result.scalars().all())
 
-    async def list_related_active(self, employee: Employee) -> list[Employee]:
-        result = await self.session.execute(
-            select(Employee)
-            .where(
-                Employee.is_active.is_(True),
-                Employee.yclients_staff_id == employee.yclients_staff_id,
-            )
-            .options(selectinload(Employee.branch), selectinload(Employee.telegram_user))
-            .order_by(Employee.full_name.asc())
-        )
-        employees = list(result.scalars().all())
-        return sorted(employees, key=lambda item: ((item.branch.name if item.branch else ""), item.full_name))
-
     async def get_full(self, employee_id: UUID) -> Employee | None:
         result = await self.session.execute(
             select(Employee)
@@ -66,8 +53,21 @@ class EmployeeRepository(BaseRepository[Employee]):
             .join(TelegramUser, Employee.telegram_user_id == TelegramUser.id)
             .where(TelegramUser.telegram_id == telegram_id, Employee.is_active.is_(True))
             .options(selectinload(Employee.branch), selectinload(Employee.telegram_user))
+            .order_by(Employee.connected_at.desc().nullslast(), Employee.full_name.asc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def list_by_telegram_id(self, telegram_id: int) -> list[Employee]:
+        result = await self.session.execute(
+            select(Employee)
+            .join(TelegramUser, Employee.telegram_user_id == TelegramUser.id)
+            .where(TelegramUser.telegram_id == telegram_id, Employee.is_active.is_(True))
+            .options(selectinload(Employee.branch), selectinload(Employee.telegram_user))
+            .order_by(Employee.full_name.asc())
+        )
+        employees = list(result.scalars().all())
+        return sorted(employees, key=lambda item: ((item.branch.name if item.branch else ""), item.full_name))
 
     async def upsert(
         self,

@@ -52,6 +52,12 @@ class TelegramUserRepository(BaseRepository[TelegramUser]):
         await self.session.flush()
         return user
 
+    async def update_role(self, user: TelegramUser, role: Role) -> TelegramUser:
+        user.role = role
+        user.is_active = True
+        await self.session.flush()
+        return user
+
     async def delete_employee_users(self) -> int:
         result = await self.session.execute(delete(TelegramUser).where(TelegramUser.role == Role.EMPLOYEE))
         await self.session.flush()
