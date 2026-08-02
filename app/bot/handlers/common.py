@@ -23,6 +23,10 @@ router = Router(name="common")
 logger = get_logger(__name__)
 
 
+def _text_is_not_command(message: Message) -> bool:
+    return not (message.text or "").lstrip().startswith("/")
+
+
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     await state.clear()
@@ -78,7 +82,7 @@ async def cancel(message: Message, state: FSMContext) -> None:
     await message.answer("Действие отменено.", reply_markup=remove_keyboard())
 
 
-@router.message(EmployeeConnectionStates.waiting_code, F.text)
+@router.message(EmployeeConnectionStates.waiting_code, F.text, _text_is_not_command)
 async def bind_employee(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     code = (message.text or "").strip()
     if code.startswith("fr_"):
