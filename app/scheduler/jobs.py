@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from contextlib import suppress
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -114,17 +115,23 @@ async def send_monthly_reports(
         employees = await _connected_employees(session)
         previous_month = _previous_month(date.today())
         for employee in employees:
-            await bot.send_message(
+            await _send_rich_or_text(
+                bot,
                 employee.telegram_user.telegram_id,
-                await services.statistics.employee_stats_text(employee, "previous_month"),
+                rich_message=await services.statistics.employee_stats_rich_message(employee, "previous_month"),
+                fallback_text=await services.statistics.employee_stats_text(employee, "previous_month", refresh=False),
             )
-            await bot.send_message(
+            await _send_rich_or_text(
+                bot,
                 employee.telegram_user.telegram_id,
-                await services.kpi.employee_kpi_text(employee, previous_month),
+                rich_message=await services.kpi.employee_kpi_rich_message(employee, previous_month),
+                fallback_text=await services.kpi.employee_kpi_text(employee, previous_month, refresh=False),
             )
-            await bot.send_message(
+            await _send_rich_or_text(
+                bot,
                 employee.telegram_user.telegram_id,
-                await services.grade.grade_text(employee),
+                rich_message=await services.grade.grade_rich_message(employee),
+                fallback_text=await services.grade.grade_text(employee),
             )
         await session.commit()
     logger.info("monthly_reports_sent")
@@ -141,12 +148,21 @@ async def _send_period_reports(
         services = build_services(session, settings)
         employees = await _connected_employees(session)
         for employee in employees:
-            await bot.send_message(
+            await _send_rich_or_text(
+                bot,
                 employee.telegram_user.telegram_id,
-                await services.statistics.employee_stats_text(employee, period),
+                rich_message=await services.statistics.employee_stats_rich_message(employee, period),
+                fallback_text=await services.statistics.employee_stats_text(employee, period, refresh=False),
             )
         await session.commit()
     logger.info("period_reports_sent", period=period)
+
+
+async def _send_rich_or_text(bot: Bot, chat_id: int, *, rich_message, fallback_text: str) -> None:
+    with suppress(Exception):
+        await bot.send_rich_message(chat_id=chat_id, rich_message=rich_message)
+        return
+    await bot.send_message(chat_id, fallback_text)
 
 
 async def _connected_employees(session: AsyncSession) -> list[Employee]:

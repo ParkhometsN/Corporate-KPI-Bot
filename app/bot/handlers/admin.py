@@ -19,6 +19,7 @@ from app.bot.keyboards.admin import (
     admin_reset_confirm_keyboard,
     admin_settings_keyboard,
     available_branches_keyboard,
+    back_to_employees_keyboard,
     branch_delete_confirm_keyboard,
     branch_dashboard_keyboard,
     branch_stats_period_keyboard,
@@ -214,6 +215,17 @@ async def admin_kpi_button(message: Message, state: FSMContext, services: Servic
 async def admin_settings_button(message: Message, services: ServiceContainer) -> None:
     await services.admin.ensure_admin(message.from_user.id)
     await message.answer(bold("НАСТРОЙКИ"), reply_markup=admin_settings_keyboard())
+
+
+@router.message(StateFilter(None), F.text.in_({"Франчайзи", "Руководители филиалов"}))
+async def admin_franchisees_button(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    await services.admin.ensure_admin(message.from_user.id)
+    await state.clear()
+    franchisees = await services.admin.list_franchisees()
+    await message.answer(
+        _franchisees_text(franchisees),
+        reply_markup=franchisees_keyboard(franchisees),
+    )
 
 
 @router.message(StateFilter(None), F.text.in_({"Проверка подключения", "✅ Проверка подключения"}))
@@ -511,7 +523,7 @@ async def admin_regulation_edit(callback: CallbackQuery, state: FSMContext, serv
             [
                 bold("РЕДАКТИРОВАНИЕ РЕГЛАМЕНТА"),
                 blockquote(
-                    "Отправьте новый текст регламента одним сообщением. "
+                    "Отправьте новый текст регламента одним сообщением или загрузите PDF/DOCX файл. "
                     "Можно использовать форматирование Telegram: жирный текст, курсив, цитаты и списки. "
                     "Чтобы очистить регламент, отправьте -"
                 ),
@@ -532,6 +544,39 @@ async def admin_regulation_cancel(callback: CallbackQuery, state: FSMContext, se
         reply_markup=admin_regulation_keyboard(),
     )
     await callback.answer()
+
+
+@router.message(AdminRegulationStates.waiting_text, F.document)
+async def admin_regulation_document(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    document = message.document
+    if document is None or not _is_regulation_document(document.file_name, document.mime_type):
+        await message.answer(
+            "Поддерживаются только PDF, DOC и DOCX.",
+            reply_markup=admin_regulation_edit_keyboard(),
+        )
+        return
+    caption = _regulation_message_html(message) if (message.caption or "").strip() else None
+    if caption and len(caption) > 1000:
+        await message.answer(
+            "Подпись к файлу слишком длинная. Сократите её до 1000 символов.",
+            reply_markup=admin_regulation_edit_keyboard(),
+        )
+        return
+    await services.admin.update_regulation_file(
+        file_id=document.file_id,
+        file_name=document.file_name,
+        caption=caption,
+    )
+    await state.clear()
+    await message.answer(
+        "\n\n".join(
+            [
+                bold("РЕГЛАМЕНТ СОХРАНЁН"),
+                await services.admin.regulation_text(for_admin=True),
+            ]
+        ),
+        reply_markup=admin_regulation_keyboard(),
+    )
 
 
 @router.message(AdminRegulationStates.waiting_text, F.text)
@@ -1137,11 +1182,13 @@ async def admin_broadcast_confirm_statistics(
             try:
                 fallback_text = await services.statistics.employee_stats_text(employee, "month", refresh=False)
                 rich_message = await services.statistics.employee_stats_rich_message(employee, "month")
-                await callback.bot.send_message(employee.telegram_user.telegram_id, fallback_text)
-                await callback.bot.send_rich_message(
-                    chat_id=employee.telegram_user.telegram_id,
-                    rich_message=rich_message,
-                )
+                try:
+                    await callback.bot.send_rich_message(
+                        chat_id=employee.telegram_user.telegram_id,
+                        rich_message=rich_message,
+                    )
+                except Exception:
+                    await callback.bot.send_message(employee.telegram_user.telegram_id, fallback_text)
                 sent += 1
             except Exception:
                 failed += 1
@@ -1329,7 +1376,7 @@ async def employee_admin_callback(callback: CallbackQuery, services: ServiceCont
         code = await services.connection.generate_code(employee.id)
         bot_info = await callback.bot.get_me()
         link = f"https://t.me/{bot_info.username}?start={code}"
-        await callback.message.answer(
+        sent_message = await callback.message.answer(
             "\n\n".join(
                 [
                     bold("КОД ПОДКЛЮЧЕНИЯ"),
@@ -1338,6 +1385,11 @@ async def employee_admin_callback(callback: CallbackQuery, services: ServiceCont
                     blockquote("Срок действия: 15 минут. Отправьте сотруднику код или ссылку."),
                 ]
             )
+        )
+        await services.connection.attach_code_admin_message(
+            code,
+            chat_id=sent_message.chat.id,
+            message_id=sent_message.message_id,
         )
     elif action == "disconnect":
         employee = await services.connection.disconnect_employee(employee.id)
@@ -1684,8 +1736,20 @@ def _regulation_message_html(message: Message) -> str:
     return _message_html_as_blockquote(message)
 
 
+def _is_regulation_document(file_name: str | None, mime_type: str | None) -> bool:
+    name = (file_name or "").casefold()
+    mime = (mime_type or "").casefold()
+    if name.endswith((".pdf", ".doc", ".docx")):
+        return True
+    return mime in {
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+
+
 def _message_html_as_blockquote(message: Message) -> str:
-    text = (getattr(message, "html_text", None) or html_escape(message.text or "")).strip()
+    text = (getattr(message, "html_text", None) or html_escape(message.text or message.caption or "")).strip()
     if "<blockquote" in text:
         return text
     return f"<blockquote>{text}</blockquote>"

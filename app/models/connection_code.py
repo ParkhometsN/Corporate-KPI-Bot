@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Enum, ForeignKey, String
+from sqlalchemy import BigInteger, Enum, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -24,6 +24,7 @@ class ConnectionCode(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ForeignKey("telegram_users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    admin_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    admin_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     employee = relationship("Employee", back_populates="connection_codes")
-

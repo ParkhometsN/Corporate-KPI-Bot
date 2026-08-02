@@ -10,7 +10,7 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="Филиалы"), KeyboardButton(text="Статистика команды")],
             [KeyboardButton(text="Действия для барберов"), KeyboardButton(text="Регламент компании")],
-            [KeyboardButton(text="Настройки руководителя")],
+            [KeyboardButton(text="Франчайзи"), KeyboardButton(text="Настройки руководителя")],
             [KeyboardButton(text="Проверка подключения")],
         ],
         resize_keyboard=True,
@@ -221,6 +221,14 @@ def employee_admin_keyboard(employee: Employee) -> InlineKeyboardMarkup:
         )
     rows.append([InlineKeyboardButton(text="Назад к филиалам", callback_data="admin:branches")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def back_to_employees_keyboard(branch_id: UUID) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Назад к сотрудникам", callback_data=f"branch:employees:{branch_id}")],
+        ]
+    )
 
 
 def branch_stats_period_keyboard(branch_id: UUID, selected_period: str) -> InlineKeyboardMarkup:

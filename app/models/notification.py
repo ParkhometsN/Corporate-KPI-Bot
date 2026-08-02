@@ -22,7 +22,6 @@ class NotificationSettings(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     grade_notifications_enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
     price_updates_enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
     product_updates_enabled: Mapped[bool] = mapped_column(default=True, nullable=False)
-    notification_time: Mapped[time] = mapped_column(default=time(10, 0), nullable=False)
+    notification_time: Mapped[time] = mapped_column(default=time(22, 0), nullable=False)
 
     telegram_user = relationship("TelegramUser", back_populates="notifications")
-

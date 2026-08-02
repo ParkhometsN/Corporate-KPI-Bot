@@ -1,9 +1,10 @@
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
-from app.bot.keyboards.admin import admin_main_keyboard
+from app.bot.keyboards.admin import admin_main_keyboard, back_to_employees_keyboard
 from app.bot.keyboards.employee import employee_main_keyboard
 from app.bot.keyboards.common import remove_keyboard
 from app.bot.states.employee import EmployeeConnectionStates
@@ -17,7 +18,7 @@ async def start(message: Message, state: FSMContext, services: ServiceContainer)
     await state.clear()
     if await services.admin.is_manager(message.from_user.id):
         await message.answer(
-            await services.admin.dashboard_text(),
+            await services.admin.dashboard_text(message.from_user.id),
             reply_markup=admin_main_keyboard(),
         )
         return
@@ -38,6 +39,7 @@ async def start(message: Message, state: FSMContext, services: ServiceContainer)
             )
             return
         employee = await services.connection.bind_employee(message.from_user, payload)
+        await _notify_admin_connection_success(message, services, payload, employee)
         await message.answer(
             f"Готово, Telegram подключён к сотруднику {employee.full_name}.",
             reply_markup=employee_main_keyboard(),
@@ -58,12 +60,41 @@ async def cancel(message: Message, state: FSMContext) -> None:
 
 @router.message(EmployeeConnectionStates.waiting_code, F.text)
 async def bind_employee(message: Message, state: FSMContext, services: ServiceContainer) -> None:
-    employee = await services.connection.bind_employee(message.from_user, message.text)
+    code = message.text or ""
+    employee = await services.connection.bind_employee(message.from_user, code)
+    await _notify_admin_connection_success(message, services, code, employee)
     await state.clear()
     await message.answer(
         f"Готово, Telegram подключён к сотруднику {employee.full_name}.",
         reply_markup=employee_main_keyboard(),
     )
+
+
+async def _notify_admin_connection_success(
+    message: Message,
+    services: ServiceContainer,
+    code: str,
+    employee,
+) -> None:
+    admin_message = await services.connection.admin_message_for_code(code)
+    if admin_message is None:
+        return
+    try:
+        await message.bot.edit_message_text(
+            "\n".join(
+                [
+                    "СОТРУДНИК ПОДКЛЮЧЁН",
+                    "",
+                    f"Сотрудник: {employee.full_name}",
+                    "Статус: Telegram успешно подключён.",
+                ]
+            ),
+            chat_id=admin_message.chat_id,
+            message_id=admin_message.message_id,
+            reply_markup=back_to_employees_keyboard(employee.branch_id),
+        )
+    except TelegramBadRequest:
+        return
 
 
 def _start_payload(text: str | None) -> str | None:

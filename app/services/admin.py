@@ -445,9 +445,20 @@ class AdminService:
     async def regulation_text(self, *, for_admin: bool = False) -> str:
         company = await self._require_company()
         regulation = (company.regulation_text or "").strip()
+        file_name = (company.regulation_file_name or "").strip()
+        if company.regulation_file_id:
+            parts = [
+                bold("РЕГЛАМЕНТ"),
+                pre([f"Файл {file_name or 'документ'}"]),
+            ]
+            if regulation:
+                parts.append(regulation)
+            if for_admin:
+                parts.append(blockquote("Барберы получают этот файл в своём меню и не могут его редактировать."))
+            return "\n\n".join(parts)
         if not regulation:
             message = (
-                "Регламент пока не добавлен. Нажмите «Изменить регламент» и отправьте текст одним сообщением."
+                "Регламент пока не добавлен. Нажмите «Изменить регламент» и отправьте текст или PDF/DOCX одним сообщением."
                 if for_admin
                 else "Регламент пока не добавлен. Руководитель добавит его в панели управления."
             )
@@ -461,6 +472,20 @@ class AdminService:
         company = await self._require_company()
         cleaned_text = (text or "").strip() or None
         return await self._companies.update_regulation_text(company, cleaned_text)
+
+    async def update_regulation_file(self, *, file_id: str, file_name: str | None, caption: str | None) -> Company:
+        company = await self._require_company()
+        cleaned_caption = (caption or "").strip() or None
+        return await self._companies.update_regulation_file(
+            company,
+            file_id=file_id,
+            file_name=file_name,
+            caption=cleaned_caption,
+        )
+
+    async def regulation_document(self) -> tuple[str | None, str | None, str | None]:
+        company = await self._require_company()
+        return company.regulation_file_id, company.regulation_file_name, company.regulation_text
 
     async def kpi_settings_text(self) -> str:
         company = await self._require_company()

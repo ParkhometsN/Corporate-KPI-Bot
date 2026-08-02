@@ -71,6 +71,22 @@ class CompanyRepository(BaseRepository[Company]):
 
     async def update_regulation_text(self, company: Company, text: str | None) -> Company:
         company.regulation_text = text
+        company.regulation_file_id = None
+        company.regulation_file_name = None
+        await self.session.flush()
+        return company
+
+    async def update_regulation_file(
+        self,
+        company: Company,
+        *,
+        file_id: str,
+        file_name: str | None,
+        caption: str | None,
+    ) -> Company:
+        company.regulation_text = caption
+        company.regulation_file_id = file_id
+        company.regulation_file_name = file_name
         await self.session.flush()
         return company
 

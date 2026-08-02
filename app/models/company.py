@@ -15,7 +15,9 @@ class Company(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow", nullable=False)
     admin_password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     regulation_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    statistics_time: Mapped[str] = mapped_column(String(5), default="10:00", nullable=False)
+    regulation_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    regulation_file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    statistics_time: Mapped[str] = mapped_column(String(5), default="22:00", nullable=False)
     synchronization_interval_minutes: Mapped[int] = mapped_column(default=60, nullable=False)
 
     branches = relationship("Branch", back_populates="company", cascade="all, delete-orphan")

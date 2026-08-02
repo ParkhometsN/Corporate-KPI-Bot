@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     low_stock_threshold: int = 3
     connection_code_ttl_minutes: int = 15
     sync_interval_minutes: int = 60
-    daily_report_cron: str = "0 10 * * *"
+    daily_report_cron: str = "0 22 * * *"
     weekly_report_cron: str = "0 11 * * MON"
     monthly_report_cron: str = "0 12 1 * *"
 

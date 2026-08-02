@@ -1,7 +1,7 @@
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.handlers.loading import MultiMessageResult, RichMessageResult, answer_with_loading, edit_with_loading
+from app.bot.handlers.loading import RichMessageResult, RichMessagesResult, answer_with_loading, edit_with_loading
 from app.bot.keyboards.employee import (
     employee_main_keyboard,
     notification_settings_keyboard,
@@ -151,8 +151,11 @@ async def employee_services(message: Message, services: ServiceContainer) -> Non
 async def employee_products(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
 
-    async def load_products() -> MultiMessageResult:
-        return MultiMessageResult(await services.catalog.products_messages(employee))
+    async def load_products() -> RichMessagesResult:
+        return RichMessagesResult(
+            rich_messages=await services.catalog.products_rich_messages(employee),
+            fallback_messages=await services.catalog.products_messages(employee),
+        )
 
     await answer_with_loading(
         message,
@@ -165,6 +168,13 @@ async def employee_products(message: Message, services: ServiceContainer) -> Non
 @router.message(_button_text_is("Регламент", "📋 Регламент"))
 async def employee_regulation(message: Message, services: ServiceContainer) -> None:
     await _require_employee(message, services)
+    file_id, file_name, caption = await services.admin.regulation_document()
+    if file_id:
+        await message.answer_document(
+            file_id,
+            caption=caption or f"Регламент: {file_name or 'документ'}",
+        )
+        return
     await message.answer(await services.admin.regulation_text())
 
 

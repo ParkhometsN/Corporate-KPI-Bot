@@ -1,4 +1,5 @@
 from datetime import timedelta
+from dataclasses import dataclass
 import secrets
 
 from aiogram.types import User as TelegramProfile
@@ -11,6 +12,12 @@ from app.repositories import EmployeeRepository, TelegramUserRepository
 from app.services.security import CodeHashService
 from app.utils.datetime import utc_now_naive
 from app.utils.exceptions import EntityNotFoundError, ValidationError
+
+
+@dataclass(slots=True)
+class ConnectionAdminMessage:
+    chat_id: int
+    message_id: int
 
 
 class EmployeeConnectionService:
@@ -34,6 +41,20 @@ class EmployeeConnectionService:
         self._session.add(connection_code)
         await self._session.flush()
         return code
+
+    async def attach_code_admin_message(self, code: str, *, chat_id: int, message_id: int) -> None:
+        connection_code = await self._get_code_by_plain_value(code)
+        if connection_code is None:
+            return
+        connection_code.admin_chat_id = chat_id
+        connection_code.admin_message_id = message_id
+        await self._session.flush()
+
+    async def admin_message_for_code(self, code: str) -> ConnectionAdminMessage | None:
+        connection_code = await self._get_code_by_plain_value(code)
+        if connection_code is None or connection_code.admin_chat_id is None or connection_code.admin_message_id is None:
+            return None
+        return ConnectionAdminMessage(chat_id=connection_code.admin_chat_id, message_id=connection_code.admin_message_id)
 
     async def bind_employee(self, profile: TelegramProfile, code: str) -> Employee:
         code_hash = self._code_hashes.hash_code(code)
@@ -68,6 +89,16 @@ class EmployeeConnectionService:
         connection_code.used_at = now
         await self._session.flush()
         return employee
+
+    async def _get_code_by_plain_value(self, code: str) -> ConnectionCode | None:
+        code_hash = self._code_hashes.hash_code(code)
+        result = await self._session.execute(
+            select(ConnectionCode)
+            .where(ConnectionCode.code_hash == code_hash)
+            .order_by(ConnectionCode.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def get_employee_by_telegram_id(self, telegram_id: int) -> Employee | None:
         return await self._employees.get_by_telegram_id(telegram_id)

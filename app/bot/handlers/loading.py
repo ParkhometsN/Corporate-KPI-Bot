@@ -23,12 +23,19 @@ class RichMessageResult:
 
 
 @dataclass(slots=True)
+class RichMessagesResult:
+    rich_messages: list[InputRichMessage]
+    fallback_messages: list[str]
+    reply_markup: Any | None = None
+
+
+@dataclass(slots=True)
 class MultiMessageResult:
     messages: list[str]
     reply_markup: Any | None = None
 
 
-LoadingResult = str | tuple[str, InlineKeyboardMarkup | None] | RichMessageResult | MultiMessageResult
+LoadingResult = str | tuple[str, InlineKeyboardMarkup | None] | RichMessageResult | RichMessagesResult | MultiMessageResult
 
 
 async def answer_with_loading(
@@ -93,6 +100,9 @@ async def _finish_with_loading(
     elif isinstance(result, RichMessageResult):
         await _send_rich_result(message, result, reply_markup=reply_markup)
         return
+    elif isinstance(result, RichMessagesResult):
+        await _send_rich_messages_result(message, result, reply_markup=reply_markup)
+        return
     elif isinstance(result, MultiMessageResult):
         await _send_multi_result(message, result, reply_markup=reply_markup)
         return
@@ -134,19 +144,54 @@ async def _send_rich_result(
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
-    await _safe_edit_text(
-        message,
-        result.fallback_text,
-        reply_markup=result.reply_markup or reply_markup,
-    )
+    result_markup = result.reply_markup or reply_markup
     try:
         await message.bot.send_rich_message(
             chat_id=message.chat.id,
             rich_message=result.rich_message,
-            reply_markup=result.reply_markup or reply_markup,
+            reply_markup=result_markup,
         )
+        with suppress(Exception):
+            await message.delete()
     except Exception as exc:
         logger.warning("rich_message_fallback", error=str(exc)[:300])
+        await _safe_edit_text(
+            message,
+            result.fallback_text,
+            reply_markup=result_markup,
+        )
+
+
+async def _send_rich_messages_result(
+    message: Message,
+    result: RichMessagesResult,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    rich_messages = [rich_message for rich_message in result.rich_messages if rich_message]
+    if not rich_messages:
+        await _send_multi_result(
+            message,
+            MultiMessageResult(messages=result.fallback_messages, reply_markup=result.reply_markup),
+            reply_markup=reply_markup,
+        )
+        return
+    result_markup = result.reply_markup or reply_markup
+    try:
+        for index, rich_message in enumerate(rich_messages):
+            await message.bot.send_rich_message(
+                chat_id=message.chat.id,
+                rich_message=rich_message,
+                reply_markup=result_markup if index == len(rich_messages) - 1 else None,
+            )
+        with suppress(Exception):
+            await message.delete()
+    except Exception as exc:
+        logger.warning("rich_messages_fallback", error=str(exc)[:300])
+        await _send_multi_result(
+            message,
+            MultiMessageResult(messages=result.fallback_messages, reply_markup=result_markup),
+        )
 
 
 async def _send_multi_result(

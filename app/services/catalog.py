@@ -23,6 +23,7 @@ from app.yclients.types import YClientsProduct
 
 CATALOG_LINE_WIDTH = 52
 PRODUCTS_BODY_LIMIT = 3200
+PRODUCTS_RICH_PAGE_SIZE = 32
 SERVICE_SECTION_ORDER = ("Основные услуги", "Доп. услуги", "Комплексы", "Остальное")
 PRODUCT_CATEGORY_PRIORITY = (
     "reuzel",
@@ -126,15 +127,32 @@ class CatalogService:
     async def products_text(self, employee: Employee, query: str | None = None) -> str:
         return (await self.products_messages(employee, query=query))[0]
 
+    async def products_rich_messages(self, employee: Employee, query: str | None = None) -> list[InputRichMessage]:
+        products = await self._visible_products_for_employee(employee, query=query)
+        if not products:
+            return [
+                InputRichMessage(
+                    blocks=[
+                        InputRichBlockSectionHeading(text="ТОВАРЫ", size=2),
+                        InputRichBlockParagraph(text="Товаров в наличии пока не найдено."),
+                    ]
+                )
+            ]
+        chunks = _product_rich_chunks(products, max_items=PRODUCTS_RICH_PAGE_SIZE)
+        return [
+            _product_rich_message(
+                employee=employee,
+                products=chunk,
+                products_count=len(products),
+                part_number=index + 1,
+                parts_count=len(chunks),
+                query=query,
+            )
+            for index, chunk in enumerate(chunks)
+        ]
+
     async def products_messages(self, employee: Employee, query: str | None = None) -> list[str]:
-        products: list[YClientsProduct] = []
-        try:
-            products = await self._products_from_api(employee)
-        except AppError:
-            products = []
-        if query:
-            products = [product for product in products if query.casefold() in product.title.casefold()]
-        products = _visible_products(products)
+        products = await self._visible_products_for_employee(employee, query=query)
         if not products:
             return [
                 "\n\n".join(
@@ -158,6 +176,16 @@ class CatalogService:
             )
             for index, lines in enumerate(chunks)
         ]
+
+    async def _visible_products_for_employee(self, employee: Employee, *, query: str | None) -> list[YClientsProduct]:
+        products: list[YClientsProduct] = []
+        try:
+            products = await self._products_from_api(employee)
+        except AppError:
+            products = []
+        if query:
+            products = [product for product in products if query.casefold() in product.title.casefold()]
+        return sorted(_visible_products(products), key=_product_sort_key)
 
     async def _products_from_api(self, employee: Employee) -> list[YClientsProduct]:
         company = await self._companies.get_default()
@@ -370,6 +398,19 @@ def _product_catalog_chunks(products: list[YClientsProduct], *, max_chars: int) 
     return chunks
 
 
+def _product_rich_chunks(products: list[YClientsProduct], *, max_items: int) -> list[list[YClientsProduct]]:
+    chunks: list[list[YClientsProduct]] = []
+    current: list[YClientsProduct] = []
+    for product in products:
+        if current and len(current) >= max_items:
+            chunks.append(current)
+            current = []
+        current.append(product)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _product_message(
     *,
     employee: Employee,
@@ -390,6 +431,55 @@ def _product_message(
     if query:
         summary.append(f"Поиск       {query}")
     return "\n\n".join([bold("ТОВАРЫ"), pre(summary), pre(lines)])
+
+
+def _product_rich_message(
+    *,
+    employee: Employee,
+    products: list[YClientsProduct],
+    products_count: int,
+    part_number: int,
+    parts_count: int,
+    query: str | None,
+) -> InputRichMessage:
+    summary_rows = [
+        [_table_cell("Филиал", is_header=True), _table_cell(employee.branch.name if employee.branch else "не указан")],
+        [_table_cell("В наличии", is_header=True), _table_cell(str(products_count))],
+        [_table_cell("Фильтр", is_header=True), _table_cell("только в наличии")],
+        [_table_cell("Исключено", is_header=True), _table_cell("сертификаты")],
+    ]
+    if parts_count > 1:
+        summary_rows.append([_table_cell("Часть", is_header=True), _table_cell(f"{part_number} из {parts_count}")])
+    if query:
+        summary_rows.append([_table_cell("Поиск", is_header=True), _table_cell(query)])
+
+    rows: list[list[RichBlockTableCell]] = [
+        [
+            _table_cell("Название", is_header=True),
+            _table_cell("Цена", is_header=True),
+            _table_cell("Остаток", is_header=True),
+        ]
+    ]
+    current_category: str | None = None
+    for product in products:
+        category = _product_category(product).upper()
+        if category != current_category:
+            rows.append([_table_cell(category, is_header=True, colspan=3)])
+            current_category = category
+        rows.append(
+            [
+                _table_cell(_clean_title(product.title)),
+                _table_cell(money(product.price)),
+                _table_cell(_stock_text(product.stock_amount)),
+            ]
+        )
+    return InputRichMessage(
+        blocks=[
+            InputRichBlockSectionHeading(text="ТОВАРЫ", size=2),
+            InputRichBlockTable(cells=summary_rows, is_bordered=True, is_striped=True),
+            InputRichBlockTable(cells=rows, is_bordered=True, is_striped=True),
+        ]
+    )
 
 
 def _visible_products(products: list[YClientsProduct]) -> list[YClientsProduct]:
