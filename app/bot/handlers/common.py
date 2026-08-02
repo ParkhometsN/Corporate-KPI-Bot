@@ -24,6 +24,10 @@ router = Router(name="common")
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     await state.clear()
+    payload = _start_payload(message.text)
+    if payload and payload.startswith("fr_"):
+        await _bind_franchisee_by_code(message, state, services, payload)
+        return
     if await services.admin.is_manager(message.from_user.id):
         await message.answer(
             await services.admin.dashboard_text(message.from_user.id),
@@ -32,28 +36,7 @@ async def start(message: Message, state: FSMContext, services: ServiceContainer)
             else franchisee_main_keyboard(),
         )
         return
-    payload = _start_payload(message.text)
     if payload:
-        if payload.startswith("fr_"):
-            franchisee = await services.admin.bind_franchisee(message.from_user, payload)
-            await _notify_franchise_connection_success(message, services, payload, franchisee)
-            await state.set_state(AdminYClientsLoginStates.waiting_login)
-            await message.answer(
-                "\n\n".join(
-                    [
-                        bold("РУКОВОДИТЕЛЬ ФИЛИАЛА ПОДКЛЮЧЁН"),
-                        blockquote(
-                            [
-                                f"Профиль: {franchisee.title}",
-                                "Теперь войдите в YCLIENTS, чтобы бот мог видеть ваши филиалы, сотрудников и статистику.",
-                            ]
-                        ),
-                        _yclients_login_prompt_text(),
-                    ]
-                ),
-                reply_markup=yclients_login_cancel_keyboard(),
-            )
-            return
         employee = await services.connection.bind_employee(message.from_user, payload)
         await _notify_admin_connection_success(message, services, payload, employee)
         await message.answer(
@@ -75,6 +58,11 @@ async def start(message: Message, state: FSMContext, services: ServiceContainer)
     )
 
 
+@router.message(F.text.regexp(r"^fr_[A-Za-z0-9_-]+$"))
+async def bind_franchisee_code(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    await _bind_franchisee_by_code(message, state, services, (message.text or "").strip())
+
+
 @router.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -90,6 +78,49 @@ async def bind_employee(message: Message, state: FSMContext, services: ServiceCo
     await message.answer(
         f"Готово, Telegram подключён к сотруднику {employee.full_name}.",
         reply_markup=employee_main_keyboard(),
+    )
+
+
+async def _bind_franchisee_by_code(
+    message: Message,
+    state: FSMContext,
+    services: ServiceContainer,
+    code: str,
+) -> None:
+    if await services.admin.is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer(
+            "\n\n".join(
+                [
+                    bold("ССЫЛКА ДЛЯ РУКОВОДИТЕЛЯ ФИЛИАЛА"),
+                    blockquote(
+                        [
+                            "Эта ссылка предназначена для другого Telegram-аккаунта.",
+                            "Отправьте её будущему руководителю филиала. Ваш аккаунт уже является главным руководителем.",
+                        ]
+                    ),
+                ]
+            ),
+            reply_markup=admin_main_keyboard(),
+        )
+        return
+    franchisee = await services.admin.bind_franchisee(message.from_user, code)
+    await _notify_franchise_connection_success(message, services, code, franchisee)
+    await state.set_state(AdminYClientsLoginStates.waiting_login)
+    await message.answer(
+        "\n\n".join(
+            [
+                bold("РУКОВОДИТЕЛЬ ФИЛИАЛА ПОДКЛЮЧЁН"),
+                blockquote(
+                    [
+                        f"Профиль: {franchisee.title}",
+                        "Теперь войдите в YCLIENTS, чтобы бот мог видеть ваши филиалы, сотрудников и статистику.",
+                    ]
+                ),
+                _yclients_login_prompt_text(),
+            ]
+        ),
+        reply_markup=yclients_login_cancel_keyboard(),
     )
 
 
