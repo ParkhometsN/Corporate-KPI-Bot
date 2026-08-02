@@ -221,8 +221,8 @@ async def employee_products(message: Message, services: ServiceContainer) -> Non
 
     await answer_with_loading(
         message,
-        title="ЗАГРУЗКА ПРОДАЖ",
-        detail="Запрашиваю позиции напрямую из YCLIENTS API.",
+        title="ЗАГРУЗКА ТОВАРОВ",
+        detail="Запрашиваю товары напрямую из YCLIENTS API.",
         producer=load_products,
     )
 
@@ -232,11 +232,14 @@ async def employee_regulation(message: Message, services: ServiceContainer) -> N
     await _require_employee(message, services)
     file_id, file_name, caption = await services.admin.regulation_document()
     if file_id:
-        await message.answer_document(
-            file_id,
-            caption=caption or f"Регламент: {file_name or 'документ'}",
-        )
-        return
+        try:
+            await message.answer_document(
+                file_id,
+                caption=caption or f"Регламент: {file_name or 'документ'}",
+            )
+            return
+        except Exception:
+            pass
     await message.answer(await services.admin.regulation_text())
 
 

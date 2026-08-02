@@ -9,7 +9,7 @@ def employee_main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="Статистика"), KeyboardButton(text="KPI")],
             [KeyboardButton(text="Grade Up"), KeyboardButton(text="Услуги")],
-            [KeyboardButton(text="Продажи"), KeyboardButton(text="Регламент")],
+            [KeyboardButton(text="Товары"), KeyboardButton(text="Регламент")],
             [KeyboardButton(text="Настройки")],
         ],
         resize_keyboard=True,

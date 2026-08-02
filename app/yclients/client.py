@@ -578,8 +578,9 @@ def _calculate_daily_statistic(
     for record in visited_records:
         services = _extract_record_services(record)
         if services:
-            service_revenue += _service_cost(services[0])
-            additional_services_revenue += sum((_service_cost(item) for item in services[1:]), Decimal("0"))
+            main_amount, additional_amount = _split_service_revenue(services)
+            service_revenue += main_amount
+            additional_services_revenue += additional_amount
         else:
             service_revenue += _to_decimal(
                 record.get("services_cost") or record.get("paid_full") or record.get("sum") or 0
@@ -655,6 +656,77 @@ def _extract_record_goods(record: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _split_service_revenue(services: list[dict[str, Any]]) -> tuple[Decimal, Decimal]:
+    classified = []
+    unknown = []
+    for service in services:
+        kind = _service_revenue_kind(service)
+        amount = _service_cost(service)
+        if kind is None:
+            unknown.append(amount)
+        else:
+            classified.append((kind, amount))
+    if not classified:
+        return _service_cost(services[0]), sum((_service_cost(item) for item in services[1:]), Decimal("0"))
+    main_amount = sum((amount for kind, amount in classified if kind == "main"), Decimal("0"))
+    additional_amount = sum((amount for kind, amount in classified if kind == "additional"), Decimal("0"))
+    main_amount += sum(unknown, Decimal("0"))
+    return main_amount, additional_amount
+
+
+def _service_revenue_kind(service: dict[str, Any]) -> str | None:
+    text = _service_text(service)
+    if not text:
+        return None
+    normalized = text.casefold().replace("ё", "е")
+    if "+" in text or "комплекс" in normalized or "папа" in normalized:
+        return "main"
+    additional_keywords = (
+        "воск",
+        "камуфляж",
+        "тонир",
+        "детокс",
+        "уход",
+        "патчи",
+        "уклад",
+        "окраш",
+        "завив",
+        "volcare",
+        "маска",
+        "шампун",
+        "скраб",
+    )
+    if any(keyword in normalized for keyword in additional_keywords):
+        return "additional"
+    main_keywords = (
+        "стриж",
+        "брить",
+        "бритв",
+        "бород",
+        "коррекц",
+        "шейвер",
+    )
+    if any(keyword in normalized for keyword in main_keywords):
+        return "main"
+    return None
+
+
+def _service_text(service: dict[str, Any]) -> str:
+    parts = []
+    for key in ("title", "name", "booking_title", "service_title", "category_title"):
+        value = service.get(key)
+        if value:
+            parts.append(str(value))
+    category = service.get("category")
+    if isinstance(category, dict):
+        title = category.get("title") or category.get("name")
+        if title:
+            parts.append(str(title))
+    elif category:
+        parts.append(str(category))
+    return " ".join(parts)
 
 
 def _service_cost(service: dict[str, Any]) -> Decimal:

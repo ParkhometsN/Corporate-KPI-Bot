@@ -38,6 +38,7 @@ _MONTH_NAMES = (
     "ноябрь",
     "декабрь",
 )
+_BASE_SALARY_PERCENT = Decimal("40")
 
 
 class StatisticsService:
@@ -243,6 +244,8 @@ class StatisticsService:
             f"Стрижек        {summary['haircuts_count']}",
             f"Доп. услуги    {money(summary['additional_services_revenue'])}",
             f"Продажи        {summary['products_sold']} / {money(summary['products_revenue'])}",
+            f"Допы+продажи   {money(summary['kpi_base'])}",
+            f"Процент ЗП     {summary['salary_percent_label']}",
             f"ЗП             {money(summary['salary_amount'])}",
             f"Средний чек    {money(summary['average_check'])}",
             f"Посещаемость   {summary['attendance_percent'].quantize(Decimal('0.1'))}%",
@@ -294,6 +297,8 @@ class StatisticsService:
                         ("Стрижек", summary["haircuts_count"]),
                         ("Доп. услуги", money(summary["additional_services_revenue"])),
                         ("Продажи", f"{summary['products_sold']} / {money(summary['products_revenue'])}"),
+                        ("Допы + продажи", money(summary["kpi_base"])),
+                        ("Процент ЗП", summary["salary_percent_label"]),
                         ("ЗП", money(summary["salary_amount"])),
                         ("Средний чек", money(summary["average_check"])),
                         ("Посещаемость", f"{summary['attendance_percent'].quantize(Decimal('0.1'))}%"),
@@ -582,6 +587,7 @@ class StatisticsService:
         )
 
     async def _employee_scope_summary(self, employees: list[Employee], period: str) -> dict:
+        salary_percent, kpi_salary_percent = await self._salary_percent_for_period(employees, period)
         branch_rows = []
         all_stats = []
         employee_names = []
@@ -597,7 +603,6 @@ class StatisticsService:
             additional_services_revenue = sum((item.additional_services_revenue for item in stats), Decimal("0"))
             products_sold = sum(item.products_sold for item in stats)
             products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
-            salary_amount = additional_services_revenue + products_revenue
             attendance_percent = _average_attendance(stats)
             branch_rows.append(
                 {
@@ -607,7 +612,7 @@ class StatisticsService:
                     "additional_services_revenue": additional_services_revenue,
                     "products_sold": products_sold,
                     "products_revenue": products_revenue,
-                    "salary_amount": salary_amount,
+                    "salary_amount": _salary_amount(total_revenue, salary_percent),
                     "total_revenue": total_revenue,
                     "average_check": total_revenue / haircuts_count if haircuts_count else Decimal("0"),
                     "attendance_percent": attendance_percent,
@@ -618,7 +623,7 @@ class StatisticsService:
         additional_services_revenue = sum((item.additional_services_revenue for item in all_stats), Decimal("0"))
         products_sold = sum(item.products_sold for item in all_stats)
         products_revenue = sum((item.products_revenue for item in all_stats), Decimal("0"))
-        salary_amount = additional_services_revenue + products_revenue
+        kpi_base = additional_services_revenue + products_revenue
         branch_rows = sorted(branch_rows, key=lambda row: row["salary_amount"], reverse=True)
         unique_branches = [row["branch_name"] for row in branch_rows]
         return {
@@ -629,13 +634,38 @@ class StatisticsService:
             "additional_services_revenue": additional_services_revenue,
             "products_sold": products_sold,
             "products_revenue": products_revenue,
-            "salary_amount": salary_amount,
-            "kpi_base": salary_amount,
+            "salary_amount": _salary_amount(total_revenue, salary_percent),
+            "salary_percent": salary_percent,
+            "kpi_salary_percent": kpi_salary_percent,
+            "salary_percent_label": _salary_percent_label(kpi_salary_percent),
+            "kpi_base": kpi_base,
             "total_revenue": total_revenue,
             "average_check": total_revenue / haircuts_count if haircuts_count else Decimal("0"),
             "attendance_percent": _average_attendance(all_stats),
             "branch_rows": branch_rows,
         }
+
+    async def _salary_percent_for_period(self, employees: list[Employee], period: str) -> tuple[Decimal, Decimal]:
+        company = await self._companies.get_default()
+        if company is None:
+            return _BASE_SALARY_PERCENT, Decimal("0")
+        period_start, _ = _period_bounds(period)
+        current_month = period_start.replace(day=1)
+        previous_month = _add_months(current_month, -1)
+        previous_month_start = previous_month
+        previous_month_end = _add_months(previous_month_start, 1) - timedelta(days=1)
+        previous_stats = []
+        for employee in employees:
+            previous_stats.extend(await self._daily_stats.list_period(employee.id, previous_month_start, previous_month_end))
+        kpi_base = sum(
+            (item.additional_services_revenue + item.products_revenue for item in previous_stats),
+            Decimal("0"),
+        )
+        kpi_percent = Decimal("0")
+        for rule in await self._kpi_rules.list_active(company.id):
+            if kpi_base >= rule.threshold_amount:
+                kpi_percent = rule.percent
+        return _BASE_SALARY_PERCENT + kpi_percent, kpi_percent
 
     async def _next_kpi_goal(self, kpi_base: Decimal) -> Decimal | None:
         company = await self._companies.get_default()
@@ -892,6 +922,16 @@ def _same_or_join(values: list[str], *, fallback: str) -> str:
     if len(cleaned) == 1:
         return cleaned[0]
     return " / ".join(cleaned[:3])
+
+
+def _salary_amount(total_revenue: Decimal, salary_percent: Decimal) -> Decimal:
+    return total_revenue * salary_percent / Decimal("100")
+
+
+def _salary_percent_label(kpi_salary_percent: Decimal) -> str:
+    if kpi_salary_percent > 0:
+        return f"{_BASE_SALARY_PERCENT.quantize(Decimal('0.01'))}% + KPI {kpi_salary_percent.quantize(Decimal('0.01'))}%"
+    return f"{_BASE_SALARY_PERCENT.quantize(Decimal('0.01'))}%"
 
 
 def _records_summary_lines(remote_stats: list[YClientsDailyStatistic]) -> list[str]:

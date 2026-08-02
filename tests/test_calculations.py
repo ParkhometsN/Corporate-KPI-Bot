@@ -133,6 +133,30 @@ def test_yclients_daily_statistic_filters_records_by_staff_id() -> None:
     assert stat.additional_services_revenue == Decimal("700")
 
 
+def test_yclients_daily_statistic_classifies_additional_services_by_title() -> None:
+    records = [
+        {
+            "attendance": 1,
+            "staff_id": 123,
+            "services": [
+                {"title": "Стрижка", "cost": 1500},
+                {"title": "Оформление бороды", "cost": 1200},
+                {"title": "Воск", "cost": 400},
+            ],
+        },
+    ]
+
+    stat = _calculate_daily_statistic(
+        123,
+        date(2026, 8, 2),
+        records,
+        include_records_without_staff=False,
+    )
+
+    assert stat.service_revenue == Decimal("2700")
+    assert stat.additional_services_revenue == Decimal("400")
+
+
 def test_extract_user_token_from_auth_payload_variants() -> None:
     assert _extract_user_token({"user_token": "abc"}) == "abc"
     assert _extract_user_token({"success": True, "data": {"user_token": "def"}}) == "def"

@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.models import Employee, TelegramUser
@@ -31,15 +31,11 @@ class EmployeeRepository(BaseRepository[Employee]):
         return list(result.scalars().all())
 
     async def list_related_active(self, employee: Employee) -> list[Employee]:
-        normalized_name = employee.full_name.strip().casefold()
         result = await self.session.execute(
             select(Employee)
             .where(
                 Employee.is_active.is_(True),
-                or_(
-                    Employee.yclients_staff_id == employee.yclients_staff_id,
-                    func.lower(Employee.full_name) == normalized_name,
-                ),
+                Employee.yclients_staff_id == employee.yclients_staff_id,
             )
             .options(selectinload(Employee.branch), selectinload(Employee.telegram_user))
             .order_by(Employee.full_name.asc())
