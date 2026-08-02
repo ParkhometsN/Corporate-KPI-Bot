@@ -71,6 +71,15 @@ class AdminService:
             role=Role.ADMIN,
         )
 
+    async def grant_developer_admin(self, profile: TelegramProfile) -> TelegramUser:
+        return await self._telegram_users.upsert(
+            telegram_id=profile.id,
+            username=profile.username,
+            first_name=profile.first_name,
+            last_name=profile.last_name,
+            role=Role.ADMIN,
+        )
+
     async def has_registered_admins(self) -> bool:
         return await self._telegram_users.has_active_admins()
 
@@ -219,6 +228,9 @@ class AdminService:
         for branch in await self.list_branches():
             employees.extend(await self._employees.list_by_branch(branch.id))
         return employees
+
+    async def list_active_employees(self) -> list[Employee]:
+        return await self._employees.list_active()
 
     async def get_visible_team_employees(self, telegram_id: int) -> list[Employee]:
         employees: list[Employee] = []

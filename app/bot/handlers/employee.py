@@ -1,4 +1,5 @@
 from datetime import date
+from uuid import UUID
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
@@ -8,7 +9,8 @@ from app.bot.keyboards.employee import (
     employee_main_keyboard,
     kpi_month_keyboard,
     notification_settings_keyboard,
-    stats_period_keyboard,
+    stats_scope_keyboard,
+    stats_scope_period_keyboard,
 )
 from app.services.factory import ServiceContainer
 from app.utils.exceptions import AccessDeniedError
@@ -43,6 +45,16 @@ def _button_text_is(*values: str):
 @router.message(_button_text_is("Статистика", "📊 Статистика"))
 async def employee_statistics(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
+    related_employees = _current_employee_first(
+        await services.connection.get_related_employees(employee),
+        employee,
+    )
+    if len(related_employees) > 1:
+        await message.answer(
+            "Выберите филиал для статистики.",
+            reply_markup=stats_scope_keyboard(related_employees, "month"),
+        )
+        return
 
     async def load_stats() -> RichMessageResult:
         try:
@@ -52,7 +64,7 @@ async def employee_statistics(message: Message, services: ServiceContainer) -> N
         return RichMessageResult(
             rich_message=await services.statistics.employee_stats_rich_message(employee, "month"),
             fallback_text=await services.statistics.employee_stats_text(employee, "month", refresh=False),
-            reply_markup=stats_period_keyboard("month"),
+            reply_markup=stats_scope_period_keyboard(related_employees, "month", scope="employee", scope_id=str(employee.id)),
         )
 
     await answer_with_loading(
@@ -65,22 +77,37 @@ async def employee_statistics(message: Message, services: ServiceContainer) -> N
 
 @router.callback_query(F.data.startswith("empstats:"))
 async def employee_statistics_period(callback: CallbackQuery, services: ServiceContainer) -> None:
-    employee = await services.connection.get_employee_by_telegram_id(callback.from_user.id)
-    if employee is None:
+    current_employee = await services.connection.get_employee_by_telegram_id(callback.from_user.id)
+    if current_employee is None:
         await callback.answer("Сначала подключитесь через /start.", show_alert=True)
         return
-    period = callback.data.split(":", maxsplit=1)[1]
+    period, scope, scope_id = _parse_stats_callback(callback.data)
+    related_employees = _current_employee_first(
+        await services.connection.get_related_employees(current_employee),
+        current_employee,
+    )
+    scope_employees = _scope_employees(related_employees, current_employee, scope, scope_id)
+    if not scope_employees:
+        await callback.answer("Этот филиал недоступен для вашего аккаунта.", show_alert=True)
+        return
+    scope = scope or "employee"
+    scope_id = scope_id or str(current_employee.id)
     await callback.answer()
 
     async def load_stats() -> RichMessageResult:
         try:
-            await services.statistics.refresh_period(employee, period)
+            await services.statistics.refresh_employees_period(scope_employees, period)
         except Exception:
             pass
         return RichMessageResult(
-            rich_message=await services.statistics.employee_stats_rich_message(employee, period),
-            fallback_text=await services.statistics.employee_stats_text(employee, period, refresh=False),
-            reply_markup=stats_period_keyboard(period),
+            rich_message=await services.statistics.employee_scope_stats_rich_message(scope_employees, period),
+            fallback_text="\n\n".join(await services.statistics.employee_scope_stats_text(scope_employees, period, refresh=False)),
+            reply_markup=stats_scope_period_keyboard(
+                related_employees,
+                period,
+                scope=scope,
+                scope_id=scope_id,
+            ),
         )
 
     await edit_with_loading(
@@ -182,7 +209,7 @@ async def employee_services(message: Message, services: ServiceContainer) -> Non
     )
 
 
-@router.message(_button_text_is("Товары", "🧴 Товары"))
+@router.message(_button_text_is("Продажи", "Товары", "🧴 Товары"))
 async def employee_products(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
 
@@ -194,8 +221,8 @@ async def employee_products(message: Message, services: ServiceContainer) -> Non
 
     await answer_with_loading(
         message,
-        title="ЗАГРУЗКА ТОВАРОВ",
-        detail="Запрашиваю товары напрямую из YCLIENTS API.",
+        title="ЗАГРУЗКА ПРОДАЖ",
+        detail="Запрашиваю позиции напрямую из YCLIENTS API.",
         producer=load_products,
     )
 
@@ -256,3 +283,36 @@ def _month_from_period(period: str) -> date:
         except ValueError:
             pass
     return date.today().replace(day=1)
+
+
+def _parse_stats_callback(data: str | None) -> tuple[str, str | None, str | None]:
+    parts = (data or "").split(":")
+    period = parts[1] if len(parts) > 1 else "month"
+    scope = parts[2] if len(parts) > 2 else None
+    scope_id = parts[3] if len(parts) > 3 else None
+    return period, scope, scope_id
+
+
+def _current_employee_first(employees: list, current_employee) -> list:
+    by_id = {employee.id: employee for employee in employees}
+    by_id[current_employee.id] = current_employee
+    ordered = [by_id.pop(current_employee.id)]
+    ordered.extend(sorted(by_id.values(), key=lambda item: (item.branch.name if item.branch else "", item.full_name)))
+    return ordered
+
+
+def _scope_employees(
+    related_employees: list,
+    current_employee,
+    scope: str | None,
+    scope_id: str | None,
+) -> list:
+    if scope == "all":
+        return related_employees
+    if scope == "employee" and scope_id:
+        try:
+            employee_id = UUID(scope_id)
+        except ValueError:
+            return []
+        return [employee for employee in related_employees if employee.id == employee_id]
+    return [current_employee]

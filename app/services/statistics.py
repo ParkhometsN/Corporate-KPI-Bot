@@ -150,6 +150,16 @@ class StatisticsService:
         start, today = _period_bounds(period)
         return await self._daily_stats.list_period(employee.id, start, today)
 
+    async def refresh_employees_period(
+        self,
+        employees: list[Employee],
+        period: str,
+    ) -> list[YClientsDailyStatistic]:
+        remote_stats: list[YClientsDailyStatistic] = []
+        for employee in employees:
+            remote_stats.extend(await self.refresh_period(employee, period))
+        return remote_stats
+
     async def refresh_period(self, employee: Employee, period: str) -> list[YClientsDailyStatistic]:
         start, end = _period_bounds(period)
         cache_key = ("employee", str(employee.id), period, start, end)
@@ -195,89 +205,84 @@ class StatisticsService:
                 )
             except Exception as exc:
                 logger.exception("employee_stats_refresh_failed", employee_id=str(employee.id), period=period)
-        stats = await self.get_period_stats(employee, period)
-        title = _period_title(period)
-        haircuts_count = sum(item.haircuts_count for item in stats)
-        service_revenue = sum((item.service_revenue for item in stats), Decimal("0"))
-        additional_services_revenue = sum(
-            (item.additional_services_revenue for item in stats), Decimal("0")
-        )
-        products_sold = sum(item.products_sold for item in stats)
-        products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
-        total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
-        average_check = total_revenue / haircuts_count if haircuts_count else Decimal("0")
-        service_income = service_revenue + additional_services_revenue
-        kpi_base = additional_services_revenue + products_revenue
-        goal_amount = await self._next_kpi_goal(kpi_base)
-        goal_progress = (
-            min(Decimal("100"), kpi_base / goal_amount * Decimal("100"))
-            if goal_amount and goal_amount > 0
-            else Decimal("0")
-        )
-
-        sidebar = [
-            f"Сотрудник : {employee.full_name}",
-            f"Грейд    : {employee.category_title or 'не указан'}",
-            f"KPI база : {money(kpi_base)}",
-            f"Цель     : {money(goal_amount) if goal_amount else 'не задана'}",
-            f"Прогресс : {progress_bar(goal_progress)} {goal_progress:.0f}%",
-        ]
-        metrics = [
-            f"Стрижек             {haircuts_count}",
-            f"Доход услуг         {money(service_income)}",
-            f"Основные услуги     {money(service_revenue)}",
-            f"Доп. услуги         {money(additional_services_revenue)}",
-            f"Общая выручка       {money(total_revenue)}",
-            f"Средний чек         {money(average_check)}",
-            f"Товаров продано     {products_sold}",
-            f"Выручка по товарам  {money(products_revenue)}",
-        ]
-        parts = [
-            bold(f"СТАТИСТИКА {title}"),
-            pre(_period_lines(period)),
-            pre(sidebar),
-            pre(metrics),
-        ]
+        parts = await self.employee_scope_stats_text([employee], period, refresh=False)
         record_lines = _records_summary_lines(remote_stats)
         if record_lines:
             parts.append(pre(["Записи по API", *record_lines]))
         return "\n\n".join(parts)
 
     async def employee_stats_rich_message(self, employee: Employee, period: str = "month") -> object:
-        stats = await self.get_period_stats(employee, period)
-        haircuts_count = sum(item.haircuts_count for item in stats)
-        service_revenue = sum((item.service_revenue for item in stats), Decimal("0"))
-        additional_services_revenue = sum((item.additional_services_revenue for item in stats), Decimal("0"))
-        products_sold = sum(item.products_sold for item in stats)
-        products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
-        total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
-        average_check = total_revenue / haircuts_count if haircuts_count else Decimal("0")
-        service_income = service_revenue + additional_services_revenue
-        kpi_base = additional_services_revenue + products_revenue
-        goal_amount = await self._next_kpi_goal(kpi_base)
+        return await self.employee_scope_stats_rich_message([employee], period)
+
+    async def employee_scope_stats_text(
+        self,
+        employees: list[Employee],
+        period: str = "month",
+        *,
+        refresh: bool = True,
+    ) -> list[str]:
+        if refresh:
+            await self.refresh_employees_period(employees, period)
+        summary = await self._employee_scope_summary(employees, period)
+        goal_amount = await self._next_kpi_goal(summary["kpi_base"])
         goal_progress = (
-            min(Decimal("100"), kpi_base / goal_amount * Decimal("100"))
+            min(Decimal("100"), summary["kpi_base"] / goal_amount * Decimal("100"))
+            if goal_amount and goal_amount > 0
+            else Decimal("0")
+        )
+
+        sidebar = [
+            f"Сотрудник : {summary['employee_name']}",
+            f"Филиал   : {summary['scope_label']}",
+            f"Грейд    : {summary['grade_label']}",
+            f"KPI база : {money(summary['kpi_base'])}",
+            f"Цель     : {money(goal_amount) if goal_amount else 'не задана'}",
+            f"Прогресс : {progress_bar(goal_progress)} {goal_progress:.0f}%",
+        ]
+        metrics = [
+            f"Стрижек        {summary['haircuts_count']}",
+            f"Доп. услуги    {money(summary['additional_services_revenue'])}",
+            f"Продажи        {summary['products_sold']} / {money(summary['products_revenue'])}",
+            f"ЗП             {money(summary['salary_amount'])}",
+            f"Средний чек    {money(summary['average_check'])}",
+            f"Посещаемость   {summary['attendance_percent'].quantize(Decimal('0.1'))}%",
+        ]
+        parts = [
+            bold(f"СТАТИСТИКА {_period_title(period)}"),
+            pre(_period_lines(period)),
+            pre(sidebar),
+            pre(metrics),
+        ]
+        branch_lines = _branch_scope_lines(summary["branch_rows"])
+        if branch_lines:
+            parts.append(pre(["Филиалы", *branch_lines]))
+        return parts
+
+    async def employee_scope_stats_rich_message(self, employees: list[Employee], period: str = "month") -> object:
+        summary = await self._employee_scope_summary(employees, period)
+        goal_amount = await self._next_kpi_goal(summary["kpi_base"])
+        goal_progress = (
+            min(Decimal("100"), summary["kpi_base"] / goal_amount * Decimal("100"))
             if goal_amount and goal_amount > 0
             else Decimal("0")
         )
         period_values = _period_values(period)
-        return rich_message(
-            f"СТАТИСТИКА {_period_title(period)}",
+        blocks = [
             table(
                 key_value_rows(
                     [
                         ("Период", period_values["period"]),
                         ("Даты", period_values["dates"]),
-                        ("Сотрудник", employee.full_name),
-                        ("Филиал", employee.branch.name if employee.branch else "не указан"),
-                        ("Грейд", employee.category_title or "не указан"),
+                        ("Сотрудник", summary["employee_name"]),
+                        ("Филиал", summary["scope_label"]),
+                        ("Грейд", summary["grade_label"]),
                     ]
                 )
             ),
             table(
                 key_value_rows(
                     [
-                        ("KPI база", money(kpi_base)),
+                        ("KPI база", money(summary["kpi_base"])),
                         ("Цель", money(goal_amount) if goal_amount else "не задана"),
                         ("Прогресс", f"{progress_bar(goal_progress)} {goal_progress:.0f}%"),
                     ]
@@ -286,16 +291,39 @@ class StatisticsService:
             table(
                 key_value_rows(
                     [
-                        ("Стрижек", haircuts_count),
-                        ("Доход услуг", money(service_income)),
-                        ("Основные услуги", money(service_revenue)),
-                        ("Доп. услуги", money(additional_services_revenue)),
-                        ("Выручка", money(total_revenue)),
-                        ("Средний чек", money(average_check)),
-                        ("Товары", f"{products_sold} / {money(products_revenue)}"),
+                        ("Стрижек", summary["haircuts_count"]),
+                        ("Доп. услуги", money(summary["additional_services_revenue"])),
+                        ("Продажи", f"{summary['products_sold']} / {money(summary['products_revenue'])}"),
+                        ("ЗП", money(summary["salary_amount"])),
+                        ("Средний чек", money(summary["average_check"])),
+                        ("Посещаемость", f"{summary['attendance_percent'].quantize(Decimal('0.1'))}%"),
                     ]
                 )
             ),
+        ]
+        if len(summary["branch_rows"]) > 1:
+            blocks.append(
+                table(
+                    table_rows(
+                        ["Филиал", "Стр", "Доп.", "Продажи", "ЗП", "Ср. чек"],
+                        [
+                            [
+                                row["branch_name"],
+                                row["haircuts_count"],
+                                money(row["additional_services_revenue"]),
+                                money(row["products_revenue"]),
+                                money(row["salary_amount"]),
+                                money(row["average_check"]),
+                            ]
+                            for row in summary["branch_rows"]
+                        ],
+                        numeric_columns={1, 2, 3, 4, 5},
+                    )
+                )
+            )
+        return rich_message(
+            f"СТАТИСТИКА {_period_title(period)}",
+            *blocks,
         )
 
     async def team_stats_text(
@@ -553,6 +581,62 @@ class StatisticsService:
             products_revenue=remote_stat.products_revenue,
         )
 
+    async def _employee_scope_summary(self, employees: list[Employee], period: str) -> dict:
+        branch_rows = []
+        all_stats = []
+        employee_names = []
+        grade_titles = []
+        for employee in employees:
+            stats = await self.get_period_stats(employee, period)
+            all_stats.extend(stats)
+            employee_names.append(employee.full_name)
+            if employee.category_title:
+                grade_titles.append(employee.category_title)
+            haircuts_count = sum(item.haircuts_count for item in stats)
+            total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
+            additional_services_revenue = sum((item.additional_services_revenue for item in stats), Decimal("0"))
+            products_sold = sum(item.products_sold for item in stats)
+            products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
+            salary_amount = additional_services_revenue + products_revenue
+            attendance_percent = _average_attendance(stats)
+            branch_rows.append(
+                {
+                    "employee": employee,
+                    "branch_name": employee.branch.name if employee.branch else "не указан",
+                    "haircuts_count": haircuts_count,
+                    "additional_services_revenue": additional_services_revenue,
+                    "products_sold": products_sold,
+                    "products_revenue": products_revenue,
+                    "salary_amount": salary_amount,
+                    "total_revenue": total_revenue,
+                    "average_check": total_revenue / haircuts_count if haircuts_count else Decimal("0"),
+                    "attendance_percent": attendance_percent,
+                }
+            )
+        haircuts_count = sum(item.haircuts_count for item in all_stats)
+        total_revenue = sum((item.total_revenue for item in all_stats), Decimal("0"))
+        additional_services_revenue = sum((item.additional_services_revenue for item in all_stats), Decimal("0"))
+        products_sold = sum(item.products_sold for item in all_stats)
+        products_revenue = sum((item.products_revenue for item in all_stats), Decimal("0"))
+        salary_amount = additional_services_revenue + products_revenue
+        branch_rows = sorted(branch_rows, key=lambda row: row["salary_amount"], reverse=True)
+        unique_branches = [row["branch_name"] for row in branch_rows]
+        return {
+            "employee_name": _same_or_join(employee_names, fallback="сотрудник"),
+            "scope_label": unique_branches[0] if len(unique_branches) == 1 else f"все филиалы ({len(unique_branches)})",
+            "grade_label": _same_or_join(grade_titles, fallback="не указан"),
+            "haircuts_count": haircuts_count,
+            "additional_services_revenue": additional_services_revenue,
+            "products_sold": products_sold,
+            "products_revenue": products_revenue,
+            "salary_amount": salary_amount,
+            "kpi_base": salary_amount,
+            "total_revenue": total_revenue,
+            "average_check": total_revenue / haircuts_count if haircuts_count else Decimal("0"),
+            "attendance_percent": _average_attendance(all_stats),
+            "branch_rows": branch_rows,
+        }
+
     async def _next_kpi_goal(self, kpi_base: Decimal) -> Decimal | None:
         company = await self._companies.get_default()
         if company is None:
@@ -774,6 +858,40 @@ def _branch_table_label(employee: Employee) -> str:
         return "-"
     name = employee.branch.name.replace("KREMEN", "").strip(" ·-")
     return shorten(name or employee.branch.name, 11)
+
+
+def _branch_scope_lines(branch_rows: list[dict]) -> list[str]:
+    if len(branch_rows) <= 1:
+        return []
+    lines = [f"{'Филиал':16} {'Стр':>4} {'Доп.':>10} {'Продажи':>10} {'ЗП':>10}"]
+    for row in branch_rows:
+        lines.append(
+            f"{shorten(row['branch_name'], 16):16} "
+            f"{row['haircuts_count']:>4} "
+            f"{money(row['additional_services_revenue']):>10} "
+            f"{money(row['products_revenue']):>10} "
+            f"{money(row['salary_amount']):>10}"
+        )
+    return lines
+
+
+def _average_attendance(stats: list) -> Decimal:
+    if not stats:
+        return Decimal("0")
+    return sum((item.attendance_percent for item in stats), Decimal("0")) / len(stats)
+
+
+def _same_or_join(values: list[str], *, fallback: str) -> str:
+    cleaned = []
+    for value in values:
+        value = value.strip()
+        if value and value not in cleaned:
+            cleaned.append(value)
+    if not cleaned:
+        return fallback
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return " / ".join(cleaned[:3])
 
 
 def _records_summary_lines(remote_stats: list[YClientsDailyStatistic]) -> list[str]:

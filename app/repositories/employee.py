@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.models import Employee, TelegramUser
@@ -19,6 +19,33 @@ class EmployeeRepository(BaseRepository[Employee]):
             .order_by(Employee.full_name.asc())
         )
         return list(result.scalars().all())
+
+    async def list_active(self, limit: int = 300) -> list[Employee]:
+        result = await self.session.execute(
+            select(Employee)
+            .where(Employee.is_active.is_(True))
+            .options(selectinload(Employee.branch), selectinload(Employee.telegram_user))
+            .order_by(Employee.full_name.asc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def list_related_active(self, employee: Employee) -> list[Employee]:
+        normalized_name = employee.full_name.strip().casefold()
+        result = await self.session.execute(
+            select(Employee)
+            .where(
+                Employee.is_active.is_(True),
+                or_(
+                    Employee.yclients_staff_id == employee.yclients_staff_id,
+                    func.lower(Employee.full_name) == normalized_name,
+                ),
+            )
+            .options(selectinload(Employee.branch), selectinload(Employee.telegram_user))
+            .order_by(Employee.full_name.asc())
+        )
+        employees = list(result.scalars().all())
+        return sorted(employees, key=lambda item: ((item.branch.name if item.branch else ""), item.full_name))
 
     async def get_full(self, employee_id: UUID) -> Employee | None:
         result = await self.session.execute(

@@ -1,6 +1,6 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from app.models import NotificationSettings
+from app.models import Employee, NotificationSettings
 from app.services.statistics import canonical_period, period_kind, shifted_period
 
 
@@ -9,7 +9,7 @@ def employee_main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="Статистика"), KeyboardButton(text="KPI")],
             [KeyboardButton(text="Grade Up"), KeyboardButton(text="Услуги")],
-            [KeyboardButton(text="Товары"), KeyboardButton(text="Регламент")],
+            [KeyboardButton(text="Продажи"), KeyboardButton(text="Регламент")],
             [KeyboardButton(text="Настройки")],
         ],
         resize_keyboard=True,
@@ -38,6 +38,76 @@ def stats_period_keyboard(selected_period: str = "month") -> InlineKeyboardMarku
             ],
         ]
     )
+
+
+def stats_scope_keyboard(employees: list[Employee], selected_period: str = "month") -> InlineKeyboardMarkup:
+    root_employee = employees[0]
+    rows = [
+        [InlineKeyboardButton(text="Все филиалы", callback_data=f"empstats:{canonical_period(selected_period)}:all:{root_employee.id}")],
+    ]
+    rows.extend(
+        [
+            InlineKeyboardButton(
+                text=employee.branch.name if employee.branch else employee.full_name,
+                callback_data=f"empstats:{canonical_period(selected_period)}:employee:{employee.id}",
+            )
+        ]
+        for employee in employees
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def stats_scope_period_keyboard(
+    employees: list[Employee],
+    selected_period: str = "month",
+    *,
+    scope: str = "employee",
+    scope_id: str | None = None,
+) -> InlineKeyboardMarkup:
+    current = canonical_period(selected_period)
+    kind = period_kind(current)
+    root_employee = employees[0]
+    scope_id = scope_id or str(root_employee.id)
+
+    def marker(expected_kind: str) -> str:
+        return "✅ " if kind == expected_kind else ""
+
+    def data(period: str) -> str:
+        return f"empstats:{period}:{scope}:{scope_id}"
+
+    rows = [
+        [
+            InlineKeyboardButton(text="‹", callback_data=data(shifted_period(current, -1))),
+            InlineKeyboardButton(text="Обновить", callback_data=data(current)),
+            InlineKeyboardButton(text="›", callback_data=data(shifted_period(current, 1))),
+        ],
+        [
+            InlineKeyboardButton(text=f"{marker('day')}День", callback_data=data("today")),
+            InlineKeyboardButton(text=f"{marker('week')}Неделя", callback_data=data("week")),
+            InlineKeyboardButton(text=f"{marker('month')}Месяц", callback_data=data("month")),
+        ],
+    ]
+    if len(employees) > 1:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=("✅ Все филиалы" if scope == "all" else "Все филиалы"),
+                    callback_data=f"empstats:{current}:all:{root_employee.id}",
+                )
+            ]
+        )
+        for employee in employees:
+            selected = scope == "employee" and scope_id == str(employee.id)
+            branch_name = employee.branch.name if employee.branch else employee.full_name
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{'✅ ' if selected else ''}{branch_name}",
+                        callback_data=f"empstats:{current}:employee:{employee.id}",
+                    )
+                ]
+            )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kpi_month_keyboard(selected_period: str = "month") -> InlineKeyboardMarkup:
