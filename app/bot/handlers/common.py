@@ -15,16 +15,25 @@ from app.bot.keyboards.employee import employee_main_keyboard
 from app.bot.keyboards.common import remove_keyboard
 from app.bot.states.admin import AdminYClientsLoginStates
 from app.bot.states.employee import EmployeeConnectionStates
+from app.config.logging import get_logger
 from app.services.factory import ServiceContainer
 from app.utils.telegram_formatting import blockquote, bold
 
 router = Router(name="common")
+logger = get_logger(__name__)
 
 
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     await state.clear()
     payload = _start_payload(message.text)
+    logger.info(
+        "start_command_received",
+        telegram_id=message.from_user.id,
+        has_payload=bool(payload),
+        payload_kind=_payload_kind(payload),
+        payload_length=len(payload or ""),
+    )
     if payload and payload.startswith("fr_"):
         await _bind_franchisee_by_code(message, state, services, payload)
         return
@@ -53,7 +62,7 @@ async def start(message: Message, state: FSMContext, services: ServiceContainer)
         return
     await state.set_state(EmployeeConnectionStates.waiting_code)
     await message.answer(
-        "Здравствуйте.\nВведите код подключения, который выдал руководитель.",
+        "Здравствуйте.\nВведите код подключения сотрудника или руководителя филиала.",
         reply_markup=remove_keyboard(),
     )
 
@@ -71,7 +80,10 @@ async def cancel(message: Message, state: FSMContext) -> None:
 
 @router.message(EmployeeConnectionStates.waiting_code, F.text)
 async def bind_employee(message: Message, state: FSMContext, services: ServiceContainer) -> None:
-    code = message.text or ""
+    code = (message.text or "").strip()
+    if code.startswith("fr_"):
+        await _bind_franchisee_by_code(message, state, services, code)
+        return
     employee = await services.connection.bind_employee(message.from_user, code)
     await _notify_admin_connection_success(message, services, code, employee)
     await state.clear()
@@ -104,6 +116,11 @@ async def _bind_franchisee_by_code(
             reply_markup=admin_main_keyboard(),
         )
         return
+    logger.info(
+        "franchise_invite_binding_started",
+        telegram_id=message.from_user.id,
+        code_length=len(code),
+    )
     franchisee = await services.admin.bind_franchisee(message.from_user, code)
     await _notify_franchise_connection_success(message, services, code, franchisee)
     await state.set_state(AdminYClientsLoginStates.waiting_login)
@@ -199,3 +216,11 @@ def _start_payload(text: str | None) -> str | None:
     if len(parts) != 2:
         return None
     return parts[1].strip() or None
+
+
+def _payload_kind(payload: str | None) -> str:
+    if not payload:
+        return "none"
+    if payload.startswith("fr_"):
+        return "franchise"
+    return "employee"

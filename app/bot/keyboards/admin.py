@@ -79,6 +79,15 @@ def yclients_login_cancel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def franchise_invite_keyboard(link: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть подключение", url=link)],
+            [InlineKeyboardButton(text="Назад к франчайзи", callback_data="admin:franchisees")],
+        ]
+    )
+
+
 def admin_regulation_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

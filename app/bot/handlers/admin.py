@@ -33,6 +33,7 @@ from app.bot.keyboards.admin import (
     employee_stats_period_keyboard,
     employees_keyboard,
     franchise_delete_confirm_keyboard,
+    franchise_invite_keyboard,
     franchisee_main_keyboard,
     franchisee_settings_keyboard,
     franchisee_keyboard,
@@ -675,12 +676,13 @@ async def admin_franchise_invite(callback: CallbackQuery, services: ServiceConta
                 blockquote(
                     [
                         "После перехода по ссылке человек подключится как руководитель филиала.",
+                        "Если Telegram просто открыл чат и ничего не отправил, нужно отправить код из этого сообщения вручную.",
                         "Доступ к вашим филиалам по умолчанию выключен. Его можно включить в карточке руководителя.",
                     ]
                 ),
             ]
         ),
-        reply_markup=back_to_franchisees_keyboard(),
+        reply_markup=franchise_invite_keyboard(link),
     )
     await services.admin.attach_franchise_invite_message(
         code,
