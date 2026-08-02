@@ -88,6 +88,10 @@ class AdminService:
         user = await self._telegram_users.get_by_telegram_id(telegram_id)
         if user is None:
             return None
+        employee_links = await self._employees.list_by_telegram_id(telegram_id)
+        franchisee = await self._franchisees.get_by_telegram_user_id(user.id)
+        if employee_links and franchisee is None:
+            role = Role.EMPLOYEE
         if role is None:
             role = Role.EMPLOYEE
         return await self._telegram_users.update_role(user, role)
