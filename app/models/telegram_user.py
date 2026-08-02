@@ -13,7 +13,7 @@ class TelegramUser(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[Role] = mapped_column(
-        Enum(Role, name="role", native_enum=False),
+        Enum(Role, name="role", native_enum=False, length=32),
         default=Role.EMPLOYEE,
         nullable=False,
     )
@@ -26,4 +26,3 @@ class TelegramUser(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         cascade="all, delete-orphan",
         uselist=False,
     )
-
