@@ -17,6 +17,29 @@ from app.yclients.types import (
 )
 
 PRODUCT_PAGE_BATCH_SIZE = 8
+_OCCUPANCY_PERCENT_KEYS = (
+    "occupancy_percent",
+    "occupation_percent",
+    "filling_percent",
+    "load_percent",
+    "workload_percent",
+    "utilization_percent",
+    "booked_percent",
+    "filled_percent",
+    "average_occupancy_percent",
+    "avg_occupancy_percent",
+)
+_PERCENT_CONTAINER_KEYS = (
+    "analytics",
+    "stat",
+    "stats",
+    "statistics",
+    "staff",
+    "workload",
+    "occupation",
+    "occupancy",
+    "schedule",
+)
 
 
 class YClientsApiError(YClientsError):
@@ -596,6 +619,10 @@ def _calculate_daily_statistic(
         if records_list
         else Decimal("0")
     )
+    client_records_count, returning_clients_count, returning_clients_percent = _returning_clients_metrics(
+        visited_records
+    )
+    occupancy_percent = _average_occupancy_percent(records_list)
 
     return YClientsDailyStatistic(
         employee_staff_id=employee_staff_id,
@@ -606,6 +633,10 @@ def _calculate_daily_statistic(
         total_revenue=total_revenue,
         average_check=average_check,
         attendance_percent=attendance_percent,
+        client_records_count=client_records_count,
+        returning_clients_count=returning_clients_count,
+        returning_clients_percent=returning_clients_percent,
+        occupancy_percent=occupancy_percent,
         products_sold=products_sold,
         products_revenue=products_revenue,
         raw_payload={"records": records_list},
@@ -656,6 +687,76 @@ def _extract_record_goods(record: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def _returning_clients_metrics(records: list[dict[str, Any]]) -> tuple[int, int, Decimal]:
+    known_client_records = 0
+    repeat_clients = 0
+    for record in records:
+        client = record.get("client")
+        if not isinstance(client, dict):
+            continue
+        is_new = _client_is_new(client)
+        if is_new is None:
+            continue
+        known_client_records += 1
+        if not is_new:
+            repeat_clients += 1
+    return known_client_records, repeat_clients, _percent(repeat_clients, known_client_records)
+
+
+def _client_is_new(client: dict[str, Any]) -> bool | None:
+    for key in ("is_new", "isNew", "new", "is_first_visit", "first_visit", "firstVisit"):
+        if key in client:
+            return _boolish_true(client.get(key))
+    return None
+
+
+def _average_occupancy_percent(records: list[dict[str, Any]]) -> Decimal:
+    values = [
+        percent
+        for record in records
+        if isinstance(record, dict)
+        for percent in [_extract_occupancy_percent(record)]
+        if percent is not None
+    ]
+    if not values:
+        return Decimal("0")
+    return sum(values, Decimal("0")) / len(values)
+
+
+def _extract_occupancy_percent(payload: dict[str, Any], *, depth: int = 0) -> Decimal | None:
+    for key in _OCCUPANCY_PERCENT_KEYS:
+        if key in payload:
+            value = _normalize_percent_value(payload.get(key))
+            if value is not None:
+                return value
+    if depth >= 2:
+        return None
+    for key in _PERCENT_CONTAINER_KEYS:
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            value = _extract_occupancy_percent(nested, depth=depth + 1)
+            if value is not None:
+                return value
+    return None
+
+
+def _normalize_percent_value(value: Any) -> Decimal | None:
+    percent = _to_decimal(value)
+    if percent < 0:
+        return None
+    if Decimal("0") < percent <= Decimal("1"):
+        percent *= Decimal("100")
+    if percent > Decimal("100"):
+        return Decimal("100")
+    return percent
+
+
+def _percent(value: int, total: int) -> Decimal:
+    if total <= 0:
+        return Decimal("0")
+    return Decimal(value) / Decimal(total) * Decimal("100")
 
 
 def _split_service_revenue(services: list[dict[str, Any]]) -> tuple[Decimal, Decimal]:

@@ -32,6 +32,10 @@ class DailyStatistic(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     total_revenue: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     average_check: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     attendance_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=0, nullable=False)
+    client_records_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    returning_clients_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    returning_clients_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=0, nullable=False)
+    occupancy_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=0, nullable=False)
     products_sold: Mapped[int] = mapped_column(default=0, nullable=False)
     products_revenue: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
 
@@ -52,8 +56,11 @@ class MonthlyStatistic(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     total_revenue: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     average_check: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     attendance_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=0, nullable=False)
+    client_records_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    returning_clients_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    returning_clients_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=0, nullable=False)
+    occupancy_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=0, nullable=False)
     products_sold: Mapped[int] = mapped_column(default=0, nullable=False)
     products_revenue: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
 
     employee = relationship("Employee", back_populates="monthly_statistics")
-

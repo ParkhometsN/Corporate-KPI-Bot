@@ -43,6 +43,10 @@ class DailyStatisticRepository(BaseRepository[DailyStatistic]):
         total_revenue: Decimal,
         average_check: Decimal,
         attendance_percent: Decimal,
+        client_records_count: int,
+        returning_clients_count: int,
+        returning_clients_percent: Decimal,
+        occupancy_percent: Decimal,
         products_sold: int,
         products_revenue: Decimal,
     ) -> DailyStatistic:
@@ -56,6 +60,10 @@ class DailyStatisticRepository(BaseRepository[DailyStatistic]):
         stat.total_revenue = total_revenue
         stat.average_check = average_check
         stat.attendance_percent = attendance_percent
+        stat.client_records_count = client_records_count
+        stat.returning_clients_count = returning_clients_count
+        stat.returning_clients_percent = returning_clients_percent
+        stat.occupancy_percent = occupancy_percent
         stat.products_sold = products_sold
         stat.products_revenue = products_revenue
         await self.session.flush()
@@ -112,8 +120,25 @@ class MonthlyStatisticRepository(BaseRepository[MonthlyStatistic]):
             if daily_stats
             else Decimal("0")
         )
+        stat.client_records_count = sum(item.client_records_count for item in daily_stats)
+        stat.returning_clients_count = sum(item.returning_clients_count for item in daily_stats)
+        stat.returning_clients_percent = _percent(
+            stat.returning_clients_count,
+            stat.client_records_count,
+        )
+        stat.occupancy_percent = (
+            sum((item.occupancy_percent for item in daily_stats), Decimal("0")) / len(daily_stats)
+            if daily_stats
+            else Decimal("0")
+        )
         await self.session.flush()
         return stat
+
+
+def _percent(value: int, total: int) -> Decimal:
+    if total <= 0:
+        return Decimal("0")
+    return Decimal(value) / Decimal(total) * Decimal("100")
 
 
 class EmployeeKpiRepository(BaseRepository[EmployeeKpi]):
@@ -124,4 +149,3 @@ class EmployeeKpiRepository(BaseRepository[EmployeeKpi]):
             select(EmployeeKpi).where(EmployeeKpi.employee_id == employee_id, EmployeeKpi.month == month)
         )
         return result.scalar_one_or_none()
-

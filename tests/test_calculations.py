@@ -91,11 +91,15 @@ def test_yclients_daily_statistic_calculation() -> None:
     records = [
         {
             "attendance": 1,
+            "client": {"is_new": True},
+            "occupancy_percent": "0.4",
             "services": [{"cost": 2000}, {"cost": 500}],
             "goods": [{"cost": 700}],
         },
         {
             "attendance": 1,
+            "client": {"is_new": False},
+            "analytics": {"filling_percent": 60},
             "services": [{"cost": 1500}],
         },
         {
@@ -112,6 +116,8 @@ def test_yclients_daily_statistic_calculation() -> None:
     assert stat.products_revenue == Decimal("700")
     assert stat.total_revenue == Decimal("4700")
     assert stat.products_sold == 1
+    assert stat.returning_clients_percent == Decimal("50.0")
+    assert stat.occupancy_percent == Decimal("50.0")
 
 
 def test_yclients_daily_statistic_filters_records_by_staff_id() -> None:

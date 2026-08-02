@@ -245,7 +245,8 @@ class StatisticsService:
             f"Продажи        {summary['products_sold']} / {money(summary['products_revenue'])}",
             f"Допы+продажи   {money(summary['kpi_base'])}",
             f"Средний чек    {money(summary['average_check'])}",
-            f"Посещаемость   {summary['attendance_percent'].quantize(Decimal('0.1'))}%",
+            f"Возвращаемость {summary['returning_clients_percent'].quantize(Decimal('0.1'))}%",
+            f"Заполненность  {summary['occupancy_percent'].quantize(Decimal('0.1'))}%",
         ]
         parts = [
             bold(f"СТАТИСТИКА {_period_title(period)}"),
@@ -296,7 +297,8 @@ class StatisticsService:
                         ("Продажи", f"{summary['products_sold']} / {money(summary['products_revenue'])}"),
                         ("Допы + продажи", money(summary["kpi_base"])),
                         ("Средний чек", money(summary["average_check"])),
-                        ("Посещаемость", f"{summary['attendance_percent'].quantize(Decimal('0.1'))}%"),
+                        ("Возвращаемость", f"{summary['returning_clients_percent'].quantize(Decimal('0.1'))}%"),
+                        ("Средняя заполненность", f"{summary['occupancy_percent'].quantize(Decimal('0.1'))}%"),
                     ]
                 )
             ),
@@ -576,6 +578,10 @@ class StatisticsService:
             total_revenue=remote_stat.total_revenue,
             average_check=remote_stat.average_check,
             attendance_percent=remote_stat.attendance_percent,
+            client_records_count=remote_stat.client_records_count,
+            returning_clients_count=remote_stat.returning_clients_count,
+            returning_clients_percent=remote_stat.returning_clients_percent,
+            occupancy_percent=remote_stat.occupancy_percent,
             products_sold=remote_stat.products_sold,
             products_revenue=remote_stat.products_revenue,
         )
@@ -597,6 +603,10 @@ class StatisticsService:
             products_sold = sum(item.products_sold for item in stats)
             products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
             attendance_percent = _average_attendance(stats)
+            client_records_count = sum(getattr(item, "client_records_count", 0) for item in stats)
+            returning_clients_count = sum(getattr(item, "returning_clients_count", 0) for item in stats)
+            returning_clients_percent = _percent(returning_clients_count, client_records_count)
+            occupancy_percent = _average_occupancy(stats)
             branch_rows.append(
                 {
                     "employee": employee,
@@ -608,6 +618,10 @@ class StatisticsService:
                     "total_revenue": total_revenue,
                     "average_check": total_revenue / haircuts_count if haircuts_count else Decimal("0"),
                     "attendance_percent": attendance_percent,
+                    "client_records_count": client_records_count,
+                    "returning_clients_count": returning_clients_count,
+                    "returning_clients_percent": returning_clients_percent,
+                    "occupancy_percent": occupancy_percent,
                 }
             )
         haircuts_count = sum(item.haircuts_count for item in all_stats)
@@ -616,6 +630,8 @@ class StatisticsService:
         products_sold = sum(item.products_sold for item in all_stats)
         products_revenue = sum((item.products_revenue for item in all_stats), Decimal("0"))
         kpi_base = additional_services_revenue + products_revenue
+        client_records_count = sum(getattr(item, "client_records_count", 0) for item in all_stats)
+        returning_clients_count = sum(getattr(item, "returning_clients_count", 0) for item in all_stats)
         branch_rows = sorted(branch_rows, key=lambda row: row["total_revenue"], reverse=True)
         unique_branches = [row["branch_name"] for row in branch_rows]
         return {
@@ -630,6 +646,10 @@ class StatisticsService:
             "total_revenue": total_revenue,
             "average_check": total_revenue / haircuts_count if haircuts_count else Decimal("0"),
             "attendance_percent": _average_attendance(all_stats),
+            "client_records_count": client_records_count,
+            "returning_clients_count": returning_clients_count,
+            "returning_clients_percent": _percent(returning_clients_count, client_records_count),
+            "occupancy_percent": _average_occupancy(all_stats),
             "branch_rows": branch_rows,
         }
 
@@ -872,9 +892,23 @@ def _branch_scope_lines(branch_rows: list[dict]) -> list[str]:
 
 
 def _average_attendance(stats: list) -> Decimal:
+    return _average_decimal_attr(stats, "attendance_percent")
+
+
+def _average_occupancy(stats: list) -> Decimal:
+    return _average_decimal_attr(stats, "occupancy_percent")
+
+
+def _average_decimal_attr(stats: list, field_name: str) -> Decimal:
     if not stats:
         return Decimal("0")
-    return sum((item.attendance_percent for item in stats), Decimal("0")) / len(stats)
+    return sum((getattr(item, field_name, Decimal("0")) for item in stats), Decimal("0")) / len(stats)
+
+
+def _percent(value: int, total: int) -> Decimal:
+    if total <= 0:
+        return Decimal("0")
+    return Decimal(value) / Decimal(total) * Decimal("100")
 
 
 def _same_or_join(values: list[str], *, fallback: str) -> str:

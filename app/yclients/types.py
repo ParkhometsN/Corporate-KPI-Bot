@@ -47,6 +47,10 @@ class YClientsDailyStatistic:
     total_revenue: Decimal
     average_check: Decimal
     attendance_percent: Decimal
+    client_records_count: int
+    returning_clients_count: int
+    returning_clients_percent: Decimal
+    occupancy_percent: Decimal
     products_sold: int
     products_revenue: Decimal
     raw_payload: dict[str, Any]
