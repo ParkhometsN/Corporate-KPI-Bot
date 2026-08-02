@@ -3,6 +3,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
+from app.bot.keyboards.admin import admin_main_keyboard
 from app.bot.keyboards.employee import employee_main_keyboard
 from app.bot.keyboards.common import remove_keyboard
 from app.bot.states.employee import EmployeeConnectionStates
@@ -14,6 +15,12 @@ router = Router(name="common")
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     await state.clear()
+    if await services.admin.is_manager(message.from_user.id):
+        await message.answer(
+            await services.admin.dashboard_text(),
+            reply_markup=admin_main_keyboard(),
+        )
+        return
     employee = await services.connection.get_employee_by_telegram_id(message.from_user.id)
     if employee:
         await message.answer(
@@ -23,6 +30,13 @@ async def start(message: Message, state: FSMContext, services: ServiceContainer)
         return
     payload = _start_payload(message.text)
     if payload:
+        if payload.startswith("fr_"):
+            franchisee = await services.admin.bind_franchisee(message.from_user, payload)
+            await message.answer(
+                f"Готово, вы подключены как руководитель филиала: {franchisee.title}.",
+                reply_markup=admin_main_keyboard(),
+            )
+            return
         employee = await services.connection.bind_employee(message.from_user, payload)
         await message.answer(
             f"Готово, Telegram подключён к сотруднику {employee.full_name}.",

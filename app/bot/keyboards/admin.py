@@ -41,6 +41,8 @@ def admin_settings_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Войти в YCLIENTS", callback_data="admin:yclients_login")],
             [InlineKeyboardButton(text="Обновить User token", callback_data="admin:setup_user_token")],
             [InlineKeyboardButton(text="Настройка KPI", callback_data="admin:kpi")],
+            [InlineKeyboardButton(text="Настройка Grade Up", callback_data="admin:grade")],
+            [InlineKeyboardButton(text="Руководители филиалов", callback_data="admin:franchisees")],
             [InlineKeyboardButton(text="Регламент", callback_data="admin:regulation")],
             [InlineKeyboardButton(text="Сброс до регистрации", callback_data="admin:reset")],
             [InlineKeyboardButton(text="Назад", callback_data="admin:dashboard")],
@@ -86,6 +88,23 @@ def admin_kpi_edit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отмена", callback_data="admin:kpi_cancel")],
+        ]
+    )
+
+
+def admin_grade_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Изменить правила Grade Up", callback_data="admin:grade_edit")],
+            [InlineKeyboardButton(text="Назад", callback_data="admin:dashboard")],
+        ]
+    )
+
+
+def admin_grade_edit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin:grade_cancel")],
         ]
     )
 
@@ -231,3 +250,84 @@ def _period_buttons(prefix: str, branch: str | None, selected_period: str) -> li
         callback_data = f"{prefix}:{period}:{branch}" if branch else f"{prefix}:{period}"
         buttons.append(InlineKeyboardButton(text=f"{marker}{title}", callback_data=callback_data))
     return buttons
+
+
+def franchisees_keyboard(franchisees: list) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=_franchisee_button_text(franchisee), callback_data=f"franchise:{franchisee.id}")]
+        for franchisee in franchisees
+    ]
+    rows.append([InlineKeyboardButton(text="Создать ссылку подключения", callback_data="franchise:invite")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="admin:settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def franchisee_keyboard(franchisee, branches: list[Branch]) -> InlineKeyboardMarkup:
+    franchisee_id = str(franchisee.id)
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=("✅ Видит филиалы руководителя" if franchisee.can_view_owner_branches else "❌ Видит филиалы руководителя"),
+                callback_data=f"frt:v:{franchisee_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=("✅ Может писать сотрудникам" if franchisee.can_message_owner_employees else "❌ Может писать сотрудникам"),
+                callback_data=f"frt:m:{franchisee_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=("✅ Получает статистику" if franchisee.can_receive_owner_statistics else "❌ Получает статистику"),
+                callback_data=f"frt:s:{franchisee_id}",
+            )
+        ],
+    ]
+    rows.extend(_franchise_branch_rows(franchisee, branches))
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Разблокировать" if franchisee.is_blocked else "Заблокировать",
+                callback_data=f"franchise:{'unblock' if franchisee.is_blocked else 'block'}:{franchisee_id}",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="Удалить", callback_data=f"franchise:delete:{franchisee_id}")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="admin:franchisees")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def franchise_delete_confirm_keyboard(franchisee_id: UUID) -> InlineKeyboardMarkup:
+    value = str(franchisee_id)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"franchise:delete_confirm:{value}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"franchise:{value}")],
+        ]
+    )
+
+
+def _franchisee_button_text(franchisee) -> str:
+    marker = "❌" if franchisee.is_blocked else "✅"
+    username = f" @{franchisee.telegram_user.username}" if franchisee.telegram_user and franchisee.telegram_user.username else ""
+    return f"{marker} {franchisee.title}{username}"
+
+
+def _franchise_branch_rows(franchisee, branches: list[Branch]) -> list[list[InlineKeyboardButton]]:
+    access_by_branch = {access.branch_id: access for access in franchisee.branch_accesses}
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, branch in enumerate(branches[:20]):
+        access = access_by_branch.get(branch.id)
+        view = bool(access and access.is_active and access.can_view_statistics)
+        message = bool(access and access.is_active and access.can_message_employees)
+        manage = bool(access and access.is_active and access.can_manage_employees)
+        rows.append([InlineKeyboardButton(text=f"{branch.name}", callback_data=f"franchise:{franchisee.id}")])
+        rows.append(
+            [
+                InlineKeyboardButton(text=("✅ Стат." if view else "❌ Стат."), callback_data=f"frb:v:{franchisee.id}:{index}"),
+                InlineKeyboardButton(text=("✅ Сообщ." if message else "❌ Сообщ."), callback_data=f"frb:m:{franchisee.id}:{index}"),
+                InlineKeyboardButton(text=("✅ Управл." if manage else "❌ Управл."), callback_data=f"frb:g:{franchisee.id}:{index}"),
+            ]
+        )
+    return rows

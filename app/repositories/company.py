@@ -163,16 +163,60 @@ class GradeRuleRepository(BaseRepository[GradeRule]):
         )
         return list(result.scalars().all())
 
+    async def list_by_company(self, company_id) -> list[GradeRule]:
+        result = await self.session.execute(
+            select(GradeRule)
+            .where(GradeRule.company_id == company_id)
+            .order_by(GradeRule.sort_order.asc())
+        )
+        return list(result.scalars().all())
+
+    async def replace_rules(
+        self,
+        company_id,
+        rules: list[tuple[str, Decimal, Decimal, int, int]],
+    ) -> list[GradeRule]:
+        existing = await self.list_by_company(company_id)
+        existing_by_title = {rule.category_title.casefold(): rule for rule in existing}
+        updated: list[GradeRule] = []
+        for index, (title, base_price, average_revenue, months_required, min_months) in enumerate(rules, start=1):
+            rule = existing_by_title.get(title.casefold())
+            if rule is None:
+                rule = GradeRule(
+                    company_id=company_id,
+                    category_title=title,
+                    base_price=base_price,
+                    average_daily_revenue_required=average_revenue,
+                    months_required=months_required,
+                    minimum_employment_months=min_months,
+                    sort_order=index,
+                )
+                self.session.add(rule)
+            else:
+                rule.base_price = base_price
+                rule.average_daily_revenue_required = average_revenue
+                rule.months_required = months_required
+                rule.minimum_employment_months = min_months
+                rule.sort_order = index
+                rule.is_active = True
+            updated.append(rule)
+        active_titles = {title.casefold() for title, *_ in rules}
+        for rule in existing:
+            if rule.category_title.casefold() not in active_titles:
+                rule.is_active = False
+        await self.session.flush()
+        return updated
+
     async def ensure_defaults(self, company_id) -> list[GradeRule]:
         existing = await self.list_active(company_id)
         if existing:
             return existing
 
         defaults = [
-            ("1500 ₽", Decimal("1500"), Decimal("12500"), 2, 6, 1),
-            ("1700 ₽", Decimal("1700"), Decimal("14500"), 2, 6, 2),
-            ("1900 ₽", Decimal("1900"), Decimal("18000"), 3, 12, 3),
-            ("2300 ₽", Decimal("2300"), Decimal("21000"), 3, 12, 4),
+            ("Мастер", Decimal("1500"), Decimal("12500"), 2, 6, 1),
+            ("Старший мастер", Decimal("1700"), Decimal("14500"), 2, 6, 2),
+            ("Эксперт", Decimal("1900"), Decimal("18000"), 3, 12, 3),
+            ("Старший эксперт", Decimal("2300"), Decimal("21000"), 3, 12, 4),
         ]
         rules: list[GradeRule] = []
         for title, base_price, avg_revenue, months_required, min_months, order in defaults:

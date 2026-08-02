@@ -35,3 +35,7 @@ class AdminRegulationStates(StatesGroup):
 
 class AdminKpiStates(StatesGroup):
     waiting_rules = State()
+
+
+class AdminGradeStates(StatesGroup):
+    waiting_rules = State()

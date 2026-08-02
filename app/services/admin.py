@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 import re
+import secrets
 from uuid import UUID
 
 from aiogram.types import User as TelegramProfile
@@ -8,18 +9,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.logging import get_logger
 from app.config.settings import Settings
-from app.models import Branch, Company, Employee, Role, TelegramUser
+from app.models import Branch, Company, Employee, FranchiseInvite, Franchisee, Role, TelegramUser
 from app.repositories import (
     BranchRepository,
     CompanyRepository,
     EmployeeRepository,
+    FranchiseBranchAccessRepository,
+    FranchiseInviteRepository,
+    FranchiseeRepository,
     GradeRuleRepository,
     KpiRuleRepository,
     ServiceRepository,
     TelegramUserRepository,
 )
-from app.services.security import EncryptionService, PasswordService
+from app.services.security import CodeHashService, EncryptionService, PasswordService
 from app.services.sync import SyncService
+from app.utils.datetime import utc_now_naive
 from app.utils.telegram_formatting import blockquote, bold, money, pre
 from app.utils.exceptions import AccessDeniedError, EntityNotFoundError, ValidationError
 from app.yclients.client import YClientsClient
@@ -36,9 +41,13 @@ class AdminService:
         self._branches = BranchRepository(session)
         self._employees = EmployeeRepository(session)
         self._services = ServiceRepository(session)
+        self._franchisees = FranchiseeRepository(session)
+        self._franchise_invites = FranchiseInviteRepository(session)
+        self._franchise_accesses = FranchiseBranchAccessRepository(session)
         self._kpi_rules = KpiRuleRepository(session)
         self._grade_rules = GradeRuleRepository(session)
         self._telegram_users = TelegramUserRepository(session)
+        self._code_hashes = CodeHashService(settings)
         self._passwords = PasswordService()
         self._encryption = EncryptionService(settings)
         self._sync = sync_service
@@ -61,6 +70,17 @@ class AdminService:
     async def is_admin(self, telegram_id: int) -> bool:
         user = await self._telegram_users.get_by_telegram_id(telegram_id)
         return bool(user and user.role == Role.ADMIN and user.is_active)
+
+    async def is_manager(self, telegram_id: int) -> bool:
+        user = await self._telegram_users.get_by_telegram_id(telegram_id)
+        if user is None or not user.is_active:
+            return False
+        if user.role == Role.ADMIN:
+            return True
+        if user.role != Role.FRANCHISEE:
+            return False
+        franchisee = await self._franchisees.get_by_telegram_user_id(user.id)
+        return bool(franchisee and not franchisee.is_blocked)
 
     async def is_yclients_configured(self) -> bool:
         company = await self._companies.get_default()
@@ -91,14 +111,43 @@ class AdminService:
         company = await self._require_company()
         return await self._branches.list_by_company(company.id)
 
-    async def add_branch(self, yclients_branch_id: int) -> Branch:
+    async def list_visible_branches(self, telegram_id: int) -> list[Branch]:
+        user = await self.ensure_manager(telegram_id)
+        company = await self._require_company()
+        if user.role == Role.ADMIN:
+            return await self._branches.list_by_company(company.id)
+        franchisee = await self._require_franchisee(user)
+        if franchisee.can_view_owner_branches:
+            return await self._branches.list_by_company(company.id)
+        owned = await self._branches.list_owned_by_user(company.id, user.id)
+        accessed = [
+            access.branch
+            for access in franchisee.branch_accesses
+            if access.is_active
+            and access.branch is not None
+            and (
+                access.can_view_statistics
+                or access.can_message_employees
+                or access.can_manage_employees
+            )
+        ]
+        by_id = {branch.id: branch for branch in [*owned, *accessed]}
+        return sorted(by_id.values(), key=lambda branch: branch.name)
+
+    async def add_branch(self, yclients_branch_id: int, *, created_by_telegram_id: int | None = None) -> Branch:
         company = await self._require_company()
         if not self._company_has_yclients_credentials(company):
             raise EntityNotFoundError("Сначала укажите YCLIENTS API key и Partner ID.")
+        owner_user_id = None
+        if created_by_telegram_id is not None:
+            user = await self.ensure_manager(created_by_telegram_id)
+            if user.role == Role.FRANCHISEE:
+                owner_user_id = user.id
         client = self._client_for_company(company)
         remote_branch = await client.get_company(yclients_branch_id)
         branch = await self._branches.upsert(
             company_id=company.id,
+            owner_telegram_user_id=owner_user_id,
             yclients_branch_id=remote_branch.id,
             name=remote_branch.title,
             address=remote_branch.address,
@@ -111,6 +160,34 @@ class AdminService:
         if branch is None:
             raise EntityNotFoundError("Филиал не найден.")
         return branch
+
+    async def get_visible_branch(self, branch_id: UUID, telegram_id: int) -> Branch:
+        branch = await self.get_branch(branch_id)
+        user = await self.ensure_manager(telegram_id)
+        if user.role == Role.ADMIN:
+            return branch
+        franchisee = await self._require_franchisee(user)
+        if franchisee.can_view_owner_branches or branch.owner_telegram_user_id == user.id:
+            return branch
+        for access in franchisee.branch_accesses:
+            if (
+                access.branch_id == branch.id
+                and access.is_active
+                and (
+                    access.can_view_statistics
+                    or access.can_message_employees
+                    or access.can_manage_employees
+                )
+            ):
+                return branch
+        raise AccessDeniedError("Нет доступа к этому филиалу.")
+
+    async def ensure_can_delete_branch(self, branch_id: UUID, telegram_id: int) -> Branch:
+        branch = await self.get_visible_branch(branch_id, telegram_id)
+        user = await self.ensure_manager(telegram_id)
+        if user.role == Role.ADMIN or branch.owner_telegram_user_id == user.id:
+            return branch
+        raise AccessDeniedError("Руководитель филиала может удалить только свой филиал.")
 
     async def delete_branch(self, branch_id: UUID) -> Branch:
         branch = await self.get_branch(branch_id)
@@ -126,6 +203,12 @@ class AdminService:
             employees.extend(await self._employees.list_by_branch(branch.id))
         return employees
 
+    async def get_visible_team_employees(self, telegram_id: int) -> list[Employee]:
+        employees: list[Employee] = []
+        for branch in await self.list_visible_branches(telegram_id):
+            employees.extend(await self._employees.list_by_branch(branch.id))
+        return employees
+
     async def get_broadcast_targets(self, branch_id: UUID | None = None) -> list[Employee]:
         if branch_id is not None:
             employees = await self._employees.list_by_branch(branch_id)
@@ -137,10 +220,39 @@ class AdminService:
             if employee.telegram_user_id and employee.telegram_user and employee.telegram_user.is_active
         ]
 
+    async def get_visible_broadcast_targets(self, telegram_id: int, branch_id: UUID | None = None) -> list[Employee]:
+        user = await self.ensure_manager(telegram_id)
+        if user.role == Role.ADMIN:
+            return await self.get_broadcast_targets(branch_id)
+        franchisee = await self._require_franchisee(user)
+        branches = [await self.get_visible_branch(branch_id, telegram_id)] if branch_id else await self.list_visible_branches(telegram_id)
+        allowed_branch_ids = {
+            branch.id
+            for branch in branches
+            if branch.owner_telegram_user_id == user.id
+            or franchisee.can_message_owner_employees
+            or any(
+                access.branch_id == branch.id
+                and access.is_active
+                and access.can_message_employees
+                for access in franchisee.branch_accesses
+            )
+        }
+        employees: list[Employee] = []
+        for visible_branch_id in allowed_branch_ids:
+            employees.extend(await self.get_broadcast_targets(visible_branch_id))
+        return employees
+
+
     async def get_employee(self, employee_id: UUID) -> Employee:
         employee = await self._employees.get_full(employee_id)
         if employee is None:
             raise EntityNotFoundError("Сотрудник не найден.")
+        return employee
+
+    async def get_visible_employee(self, employee_id: UUID, telegram_id: int) -> Employee:
+        employee = await self.get_employee(employee_id)
+        await self.get_visible_branch(employee.branch_id, telegram_id)
         return employee
 
     async def ensure_admin(self, telegram_id: int) -> TelegramUser:
@@ -148,6 +260,116 @@ class AdminService:
         if user is None or user.role != Role.ADMIN or not user.is_active:
             raise AccessDeniedError("Сначала войдите через /admin.")
         return user
+
+    async def ensure_manager(self, telegram_id: int) -> TelegramUser:
+        user = await self._telegram_users.get_by_telegram_id(telegram_id)
+        if user is None or not user.is_active or user.role not in {Role.ADMIN, Role.FRANCHISEE}:
+            raise AccessDeniedError("Сначала войдите через /admin.")
+        if user.role == Role.FRANCHISEE:
+            franchisee = await self._franchisees.get_by_telegram_user_id(user.id)
+            if franchisee is None or franchisee.is_blocked:
+                raise AccessDeniedError("Доступ руководителя филиала заблокирован.")
+        return user
+
+    async def generate_franchise_invite(self, created_by_telegram_id: int) -> str:
+        created_by = await self.ensure_admin(created_by_telegram_id)
+        company = await self._require_company()
+        code = "fr_" + _generate_plain_code(14)
+        invite = FranchiseInvite(
+            company_id=company.id,
+            code_hash=self._code_hashes.hash_code(code),
+            expires_at=utc_now_naive() + timedelta(days=7),
+            created_by_user_id=created_by.id,
+        )
+        self._session.add(invite)
+        await self._session.flush()
+        return code
+
+    async def bind_franchisee(self, profile: TelegramProfile, code: str) -> Franchisee:
+        invite = await self._franchise_invites.get_active_by_hash(self._code_hashes.hash_code(code))
+        now = utc_now_naive()
+        if invite is None:
+            raise ValidationError("Ссылка руководителя филиала не найдена или уже использована.")
+        if invite.expires_at < now:
+            invite.status = "expired"
+            await self._session.flush()
+            raise ValidationError("Срок действия ссылки истёк. Попросите руководителя создать новую.")
+        telegram_user = await self._telegram_users.upsert(
+            telegram_id=profile.id,
+            username=profile.username,
+            first_name=profile.first_name,
+            last_name=profile.last_name,
+            role=Role.FRANCHISEE,
+        )
+        franchisee = await self._franchisees.upsert_connected(
+            company_id=invite.company_id,
+            telegram_user_id=telegram_user.id,
+            created_by_user_id=invite.created_by_user_id,
+            title=_profile_title(profile),
+        )
+        invite.franchisee_id = franchisee.id
+        invite.status = "used"
+        invite.used_at = now
+        await self._session.flush()
+        return franchisee
+
+    async def list_franchisees(self) -> list[Franchisee]:
+        company = await self._require_company()
+        return await self._franchisees.list_by_company(company.id)
+
+    async def get_franchisee(self, franchisee_id: UUID) -> Franchisee:
+        franchisee = await self._franchisees.get_full(franchisee_id)
+        if franchisee is None:
+            raise EntityNotFoundError("Руководитель филиала не найден.")
+        return franchisee
+
+    async def block_franchisee(self, franchisee_id: UUID, *, blocked: bool) -> Franchisee:
+        franchisee = await self.get_franchisee(franchisee_id)
+        return await self._franchisees.set_blocked(franchisee, blocked, reason="Заблокирован основным руководителем")
+
+    async def delete_franchisee(self, franchisee_id: UUID) -> Franchisee:
+        franchisee = await self.get_franchisee(franchisee_id)
+        if franchisee.telegram_user:
+            franchisee.telegram_user.is_active = False
+        await self._session.delete(franchisee)
+        await self._session.flush()
+        return franchisee
+
+    async def toggle_franchisee_global_permission(self, franchisee_id: UUID, field_name: str) -> Franchisee:
+        franchisee = await self.get_franchisee(franchisee_id)
+        if field_name not in {
+            "can_view_owner_branches",
+            "can_message_owner_employees",
+            "can_receive_owner_statistics",
+        }:
+            raise ValidationError("Неизвестная настройка доступа.")
+        setattr(franchisee, field_name, not getattr(franchisee, field_name))
+        await self._session.flush()
+        return await self._franchisees.get_by_telegram_user_id(franchisee.telegram_user_id) or franchisee
+
+    async def toggle_franchisee_branch_access(self, franchisee_id: UUID, branch_id: UUID, field_name: str) -> Franchisee:
+        franchisee = await self.get_franchisee(franchisee_id)
+        branch = await self.get_branch(branch_id)
+        existing = await self._franchise_accesses.get_for_pair(franchisee.id, branch.id)
+        can_view = existing.can_view_statistics if existing else False
+        can_message = existing.can_message_employees if existing else False
+        can_manage = existing.can_manage_employees if existing else False
+        if field_name == "view":
+            can_view = not can_view
+        elif field_name == "message":
+            can_message = not can_message
+        elif field_name == "manage":
+            can_manage = not can_manage
+        else:
+            raise ValidationError("Неизвестная настройка филиала.")
+        await self._franchise_accesses.upsert(
+            franchisee_id=franchisee.id,
+            branch_id=branch.id,
+            can_view_statistics=can_view,
+            can_message_employees=can_message,
+            can_manage_employees=can_manage,
+        )
+        return await self._franchisees.get_by_telegram_user_id(franchisee.telegram_user_id) or franchisee
 
     async def sync_branch(self, branch_id: UUID) -> Branch:
         branch = await self.get_branch(branch_id)
@@ -268,6 +490,38 @@ class AdminService:
         parsed_rules = _parse_kpi_rules(text)
         await self._kpi_rules.replace_rules(company.id, parsed_rules)
 
+    async def grade_settings_text(self) -> str:
+        company = await self._require_company()
+        rules = await self._grade_rules.ensure_defaults(company.id)
+        lines = [
+            (
+                f"{rule.sort_order:>2}. {rule.category_title:<18} "
+                f"{money(rule.base_price):>8}  "
+                f"{money(rule.average_daily_revenue_required):>10}/дн  "
+                f"{rule.months_required:>2} мес  "
+                f"стаж {rule.minimum_employment_months:>2} мес"
+            )
+            for rule in rules
+        ]
+        return "\n\n".join(
+            [
+                bold("НАСТРОЙКА GRADE UP"),
+                pre(["Уровень              Стрижка   Средн./день   Период   Стаж", *lines]),
+                blockquote(
+                    [
+                        "Переход считается по средней дневной выручке услуг за период.",
+                        "Товары в Grade Up не входят.",
+                        "Формат изменения: название = цена, среднедневная выручка, месяцев периода, минимальный стаж.",
+                    ]
+                ),
+            ]
+        )
+
+    async def update_grade_rules_from_text(self, text: str) -> None:
+        company = await self._require_company()
+        parsed_rules = _parse_grade_rules(text)
+        await self._grade_rules.replace_rules(company.id, parsed_rules)
+
     async def reset_to_registration(self) -> None:
         company = await self._require_company()
         admin_password_hash = company.admin_password_hash
@@ -378,17 +632,27 @@ class AdminService:
             ]
         )
 
-    async def dashboard_text(self) -> str:
+    async def dashboard_text(self, telegram_id: int | None = None) -> str:
         company = await self._require_company()
-        branches = await self._branches.list_by_company(company.id)
+        branches = await (
+            self.list_visible_branches(telegram_id)
+            if telegram_id is not None and await self.is_manager(telegram_id)
+            else self._branches.list_by_company(company.id)
+        )
         employees_count = sum(branch.employees_count for branch in branches)
         yclients_status = "✅ настроен" if self._company_has_yclients_credentials(company) else "❌ не настроен"
         user_token_status = self._company_user_token_status(company)
+        role_line = None
+        if telegram_id is not None:
+            user = await self._telegram_users.get_by_telegram_id(telegram_id)
+            if user and user.role == Role.FRANCHISEE:
+                role_line = "Роль           руководитель филиала"
         return "\n\n".join(
             [
                 bold("ПАНЕЛЬ РУКОВОДИТЕЛЯ"),
                 pre(
                     [
+                        *([role_line] if role_line else []),
                         f"Компания       {company.title}",
                         f"YCLIENTS       {yclients_status}",
                         f"User token     {user_token_status}",
@@ -405,6 +669,12 @@ class AdminService:
         if company is None:
             raise EntityNotFoundError("Компания ещё не настроена.")
         return company
+
+    async def _require_franchisee(self, user: TelegramUser) -> Franchisee:
+        franchisee = await self._franchisees.get_by_telegram_user_id(user.id)
+        if franchisee is None or franchisee.is_blocked:
+            raise AccessDeniedError("Доступ руководителя филиала заблокирован.")
+        return franchisee
 
     def _client_for_company(self, company: Company) -> YClientsClient:
         partner_token = self._encryption.decrypt(company.encrypted_yclients_api_key)
@@ -495,6 +765,57 @@ def _parse_kpi_rules(text: str) -> list[tuple[Decimal, Decimal]]:
         rules.append((Decimal("0"), Decimal("0")))
     unique_rules = {threshold: percent for threshold, percent in rules}
     return sorted(unique_rules.items(), key=lambda item: item[0])
+
+
+def _parse_grade_rules(text: str) -> list[tuple[str, Decimal, Decimal, int, int]]:
+    rules: list[tuple[str, Decimal, Decimal, int, int]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        numbers = re.findall(r"\d+(?:[,.]\d+)?", line.replace("\u00a0", " "))
+        if len(numbers) < 4:
+            raise ValidationError(
+                "Каждая строка Grade Up должна содержать цену стрижки, среднюю выручку/день, период в месяцах и стаж."
+            )
+        first_number_index = line.find(numbers[0])
+        title_part = line[:first_number_index].replace("=", "").replace("-", "").strip(" :;")
+        base_price = Decimal(numbers[0].replace(",", "."))
+        average_daily_revenue = Decimal(numbers[1].replace(",", "."))
+        months_required = int(Decimal(numbers[2].replace(",", ".")))
+        min_months = int(Decimal(numbers[3].replace(",", ".")))
+        if base_price <= 0 or average_daily_revenue <= 0:
+            raise ValidationError("Цена и средняя выручка Grade Up должны быть больше нуля.")
+        if months_required <= 0 or min_months < 0:
+            raise ValidationError("Период должен быть больше нуля, стаж не может быть отрицательным.")
+        title = title_part or _default_grade_title(base_price)
+        rules.append((title, base_price, average_daily_revenue, months_required, min_months))
+    if not rules:
+        raise ValidationError("Добавьте хотя бы одно правило Grade Up.")
+    return rules
+
+
+def _default_grade_title(base_price: Decimal) -> str:
+    return {
+        Decimal("1500"): "Мастер",
+        Decimal("1700"): "Старший мастер",
+        Decimal("1900"): "Эксперт",
+        Decimal("2300"): "Старший эксперт",
+    }.get(base_price, f"{money(base_price)}")
+
+
+def _generate_plain_code(length: int = 8) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _profile_title(profile: TelegramProfile) -> str:
+    name = " ".join(part for part in (profile.first_name, profile.last_name) if part).strip()
+    if name:
+        return name
+    if profile.username:
+        return f"@{profile.username}"
+    return f"Telegram {profile.id}"
 
 
 def _default_kpi_rules() -> list[tuple[Decimal, Decimal]]:

@@ -8,6 +8,7 @@ from app.config.settings import Settings
 from app.models import Employee, GradeRule
 from app.repositories import CompanyRepository, DailyStatisticRepository, GradeRuleRepository
 from app.services.statistics import StatisticsService, _date_range_label, money
+from app.utils.rich_messages import key_value_rows, paragraph, rich_message, table
 from app.utils.exceptions import AppError
 from app.utils.telegram_formatting import blockquote, bold, pre, progress_bar as telegram_progress_bar
 
@@ -96,6 +97,70 @@ class GradeService:
                 pre(progress_lines),
                 blockquote(digest),
             ]
+        )
+
+    async def grade_rich_message(self, employee: Employee) -> object:
+        company = await self._companies.get_default()
+        if company is None:
+            return rich_message("GRADE UP", paragraph("Компания не настроена, поэтому правила роста недоступны."))
+        rules = await self._grade_rules.ensure_defaults(company.id)
+        current_rule, next_rule = _find_current_and_next(rules, employee.category_title)
+        current_grade_label = (
+            _rule_display_title(current_rule)
+            if current_rule is not None
+            else employee.category_title or "без грейда"
+        )
+        if next_rule is None:
+            return rich_message(
+                "GRADE UP",
+                table(
+                    key_value_rows(
+                        [
+                            ("Сотрудник", employee.full_name),
+                            ("Филиал", employee.branch.name if employee.branch else "не указан"),
+                            ("Категория", current_grade_label),
+                        ]
+                    )
+                ),
+                paragraph("Вы уже на максимальной категории." if current_rule is not None else "Правила Grade Up пока не настроены."),
+            )
+
+        grade_period_start, grade_period_end = _grade_period_bounds(next_rule.months_required)
+        progress = await self._calculate_progress(employee, next_rule, grade_period_start, grade_period_end)
+        return rich_message(
+            "GRADE UP",
+            table(
+                key_value_rows(
+                    [
+                        ("Сотрудник", employee.full_name),
+                        ("Филиал", employee.branch.name if employee.branch else "не указан"),
+                        ("Сейчас", current_grade_label),
+                        ("Следующий", _rule_display_title(next_rule)),
+                        ("Период", _date_range_label(grade_period_start, grade_period_end)),
+                    ]
+                )
+            ),
+            table(
+                key_value_rows(
+                    [
+                        ("Выручка услуг", money(progress.service_revenue)),
+                        ("Дней с выручкой", progress.revenue_days),
+                        ("Средн./день", money(progress.average_daily_revenue)),
+                        ("Цель/день", money(next_rule.average_daily_revenue_required)),
+                        ("До цели/день", money(progress.daily_revenue_left)),
+                    ]
+                )
+            ),
+            table(
+                key_value_rows(
+                    [
+                        ("Период условия", f"{next_rule.months_required} мес."),
+                        ("Стаж", _tenure_line(progress.tenure_months, next_rule.minimum_employment_months)),
+                        ("Прогресс", f"{telegram_progress_bar(progress.overall_percent)} {progress.overall_percent:.0f}%"),
+                    ]
+                )
+            ),
+            paragraph("Прогресс считается по средней дневной выручке услуг. Товары в Grade Up не входят."),
         )
 
     async def _calculate_progress(

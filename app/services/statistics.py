@@ -11,6 +11,7 @@ from app.models import Branch, Employee
 from app.repositories import CompanyRepository, DailyStatisticRepository, KpiRuleRepository
 from app.services.security import EncryptionService
 from app.utils.exceptions import AppError
+from app.utils.rich_messages import cell, key_value_rows, paragraph, rich_message, table, table_rows
 from app.utils.telegram_formatting import blockquote, bold, money as format_money, pre, progress_bar, shorten
 from app.yclients.client import (
     YClientsApiError,
@@ -232,6 +233,61 @@ class StatisticsService:
             parts.append(pre(["Записи по API", *record_lines]))
         return "\n\n".join(parts)
 
+    async def employee_stats_rich_message(self, employee: Employee, period: str = "month") -> object:
+        stats = await self.get_period_stats(employee, period)
+        haircuts_count = sum(item.haircuts_count for item in stats)
+        service_revenue = sum((item.service_revenue for item in stats), Decimal("0"))
+        additional_services_revenue = sum((item.additional_services_revenue for item in stats), Decimal("0"))
+        products_sold = sum(item.products_sold for item in stats)
+        products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
+        total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
+        average_check = total_revenue / haircuts_count if haircuts_count else Decimal("0")
+        service_income = service_revenue + additional_services_revenue
+        kpi_base = additional_services_revenue + products_revenue
+        goal_amount = await self._next_kpi_goal(kpi_base)
+        goal_progress = (
+            min(Decimal("100"), kpi_base / goal_amount * Decimal("100"))
+            if goal_amount and goal_amount > 0
+            else Decimal("0")
+        )
+        period_values = _period_values(period)
+        return rich_message(
+            f"СТАТИСТИКА {_period_title(period)}",
+            table(
+                key_value_rows(
+                    [
+                        ("Месяц", period_values["month"]),
+                        ("Даты", period_values["dates"]),
+                        ("Сотрудник", employee.full_name),
+                        ("Филиал", employee.branch.name if employee.branch else "не указан"),
+                        ("Грейд", employee.category_title or "не указан"),
+                    ]
+                )
+            ),
+            table(
+                key_value_rows(
+                    [
+                        ("KPI база", money(kpi_base)),
+                        ("Цель", money(goal_amount) if goal_amount else "не задана"),
+                        ("Прогресс", f"{progress_bar(goal_progress)} {goal_progress:.0f}%"),
+                    ]
+                )
+            ),
+            table(
+                key_value_rows(
+                    [
+                        ("Стрижек", haircuts_count),
+                        ("Доход услуг", money(service_income)),
+                        ("Основные услуги", money(service_revenue)),
+                        ("Доп. услуги", money(additional_services_revenue)),
+                        ("Выручка", money(total_revenue)),
+                        ("Средний чек", money(average_check)),
+                        ("Товары", f"{products_sold} / {money(products_revenue)}"),
+                    ]
+                )
+            ),
+        )
+
     async def team_stats_text(
         self,
         employees: list[Employee],
@@ -361,6 +417,86 @@ class StatisticsService:
         ]
         return "\n\n".join(parts)
 
+    async def team_stats_rich_message(
+        self,
+        employees: list[Employee],
+        period: str,
+        *,
+        title: str,
+    ) -> object:
+        if not employees:
+            return rich_message(
+                f"СТАТИСТИКА {_period_title(period)}",
+                paragraph("Сотрудники пока не синхронизированы."),
+            )
+
+        rows = []
+        for employee in employees:
+            stats = await self.get_period_stats(employee, period)
+            haircuts_count = sum(item.haircuts_count for item in stats)
+            service_revenue = sum((item.service_revenue for item in stats), Decimal("0"))
+            additional_services_revenue = sum((item.additional_services_revenue for item in stats), Decimal("0"))
+            products_revenue = sum((item.products_revenue for item in stats), Decimal("0"))
+            total_revenue = sum((item.total_revenue for item in stats), Decimal("0"))
+            average_check = total_revenue / haircuts_count if haircuts_count else Decimal("0")
+            rows.append(
+                {
+                    "employee": employee,
+                    "haircuts_count": haircuts_count,
+                    "service_revenue": service_revenue,
+                    "additional_services_revenue": additional_services_revenue,
+                    "products_revenue": products_revenue,
+                    "total_revenue": total_revenue,
+                    "average_check": average_check,
+                    "kpi_base": additional_services_revenue + products_revenue,
+                }
+            )
+
+        total_haircuts = sum(row["haircuts_count"] for row in rows)
+        service_revenue = sum((row["service_revenue"] for row in rows), Decimal("0"))
+        additional_services_revenue = sum((row["additional_services_revenue"] for row in rows), Decimal("0"))
+        products_revenue = sum((row["products_revenue"] for row in rows), Decimal("0"))
+        total_revenue = sum((row["total_revenue"] for row in rows), Decimal("0"))
+        average_check = total_revenue / total_haircuts if total_haircuts else Decimal("0")
+        kpi_base = additional_services_revenue + products_revenue
+        period_values = _period_values(period)
+        employee_rows = [
+            [
+                _branch_table_label(row["employee"]),
+                row["employee"].full_name,
+                row["haircuts_count"],
+                money(row["average_check"]),
+                money(row["total_revenue"]),
+                money(row["kpi_base"]),
+            ]
+            for row in sorted(rows, key=lambda item: item["total_revenue"], reverse=True)
+        ]
+        return rich_message(
+            f"СТАТИСТИКА {_period_title(period)}",
+            table(
+                key_value_rows(
+                    [
+                        ("Группа", title),
+                        ("Месяц", period_values["month"]),
+                        ("Даты", period_values["dates"]),
+                        ("Сотрудников", len(employees)),
+                        ("Стрижек", total_haircuts),
+                        ("Доход услуг", money(service_revenue + additional_services_revenue)),
+                        ("KPI база", money(kpi_base)),
+                        ("Выручка", money(total_revenue)),
+                        ("Средний чек", money(average_check)),
+                    ]
+                )
+            ),
+            table(
+                table_rows(
+                    ["Филиал", "Сотрудник", "Стр", "Ср. чек", "Выручка", "KPI"],
+                    employee_rows,
+                    numeric_columns={2, 3, 4, 5},
+                )
+            ),
+        )
+
     def _client_for_company(self, company) -> YClientsClient:
         return YClientsClient(
             base_url=self._settings.yclients_base_url_str,
@@ -444,16 +580,21 @@ def _period_title(period: str) -> str:
 
 
 def _period_lines(period: str) -> list[str]:
+    values = _period_values(period)
+    return [
+        f"Месяц       {values['month']}",
+        f"Даты        {values['dates']}",
+    ]
+
+
+def _period_values(period: str) -> dict[str, str]:
     start, end = _period_bounds(period)
     month_label = (
         f"{start:%m.%Y}"
         if start.month == end.month and start.year == end.year
         else f"{start:%m.%Y}-{end:%m.%Y}"
     )
-    return [
-        f"Месяц       {month_label}",
-        f"Даты        {_date_range_label(start, end)}",
-    ]
+    return {"month": month_label, "dates": _date_range_label(start, end)}
 
 
 def _date_range_label(start: date, end: date) -> str:

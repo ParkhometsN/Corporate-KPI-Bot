@@ -7,10 +7,12 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.handlers.loading import answer_with_loading, edit_with_loading
+from app.bot.handlers.loading import RichMessageResult, answer_with_loading, edit_with_loading
 from app.bot.keyboards.admin import (
     admin_kpi_edit_keyboard,
     admin_kpi_keyboard,
+    admin_grade_edit_keyboard,
+    admin_grade_keyboard,
     admin_main_keyboard,
     admin_regulation_edit_keyboard,
     admin_regulation_keyboard,
@@ -27,6 +29,9 @@ from app.bot.keyboards.admin import (
     branches_keyboard,
     employee_admin_keyboard,
     employees_keyboard,
+    franchise_delete_confirm_keyboard,
+    franchisee_keyboard,
+    franchisees_keyboard,
     team_stats_period_keyboard,
     yclients_login_cancel_keyboard,
 )
@@ -35,6 +40,7 @@ from app.bot.states.admin import (
     AdminBranchStates,
     AdminBroadcastStates,
     AdminCompanySetupStates,
+    AdminGradeStates,
     AdminKpiStates,
     AdminRegulationStates,
     AdminYClientsLoginStates,
@@ -42,21 +48,33 @@ from app.bot.states.admin import (
 from app.services.factory import ServiceContainer
 from app.services.statistics import _period_lines
 from app.utils.exceptions import AppError
+from app.utils.rich_messages import rich_message, table, table_rows
 from app.utils.telegram_formatting import blockquote, bold, html_escape, pre, shorten
 
 router = Router(name="admin")
 
+_FRANCHISE_GLOBAL_FIELDS = {
+    "v": "can_view_owner_branches",
+    "m": "can_message_owner_employees",
+    "s": "can_receive_owner_statistics",
+}
+_FRANCHISE_BRANCH_FIELDS = {
+    "v": "view",
+    "m": "message",
+    "g": "manage",
+}
+
 
 @router.message(Command("admin"))
 async def admin_start(message: Message, state: FSMContext, services: ServiceContainer) -> None:
-    if await services.admin.is_admin(message.from_user.id):
+    if await services.admin.is_manager(message.from_user.id):
         if not await services.admin.is_yclients_configured():
             await state.set_state(AdminCompanySetupStates.waiting_api_key)
             await message.answer("YCLIENTS ещё не подключён.\nВведите API key.")
             return
         await state.clear()
         await message.answer(
-            await services.admin.dashboard_text(),
+            await services.admin.dashboard_text(message.from_user.id),
             reply_markup=admin_main_keyboard(),
         )
         return
@@ -96,11 +114,11 @@ async def admin_password(message: Message, state: FSMContext, services: ServiceC
 
 @router.callback_query(F.data == "admin:dashboard")
 async def admin_dashboard(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     await state.clear()
     await _safe_edit_text(
         callback.message,
-        await services.admin.dashboard_text(),
+        await services.admin.dashboard_text(callback.from_user.id),
         reply_markup=None,
     )
     await callback.answer()
@@ -108,27 +126,32 @@ async def admin_dashboard(callback: CallbackQuery, state: FSMContext, services: 
 
 @router.message(StateFilter(None), F.text.in_({"Панель руководителя", "Главная"}))
 async def admin_dashboard_button(message: Message, state: FSMContext, services: ServiceContainer) -> None:
-    await services.admin.ensure_admin(message.from_user.id)
+    await services.admin.ensure_manager(message.from_user.id)
     await state.clear()
-    await message.answer(await services.admin.dashboard_text(), reply_markup=admin_main_keyboard())
+    await message.answer(await services.admin.dashboard_text(message.from_user.id), reply_markup=admin_main_keyboard())
 
 
 @router.message(StateFilter(None), F.text.in_({"Филиалы", "🏢 Филиалы"}))
 async def admin_branches_button(message: Message, services: ServiceContainer) -> None:
-    await services.admin.ensure_admin(message.from_user.id)
-    branches = await services.admin.list_branches()
+    await services.admin.ensure_manager(message.from_user.id)
+    branches = await services.admin.list_visible_branches(message.from_user.id)
     await message.answer(_branches_text(branches), reply_markup=branches_keyboard(branches))
 
 
 @router.message(StateFilter(None), F.text.in_({"Статистика команды", "📊 Статистика команды"}))
 async def admin_team_stats_button(message: Message, services: ServiceContainer) -> None:
-    await services.admin.ensure_admin(message.from_user.id)
+    await services.admin.ensure_manager(message.from_user.id)
 
     async def load_team_stats():
-        employees = await services.admin.get_team_employees()
-        return (
-            await services.statistics.team_stats_text(employees, "month", title="вся команда"),
-            team_stats_period_keyboard("month"),
+        employees = await services.admin.get_visible_team_employees(message.from_user.id)
+        try:
+            await services.statistics.refresh_team_period(employees, "month")
+        except Exception:
+            pass
+        return RichMessageResult(
+            rich_message=await services.statistics.team_stats_rich_message(employees, "month", title="вся команда"),
+            fallback_text=await services.statistics.team_stats_text(employees, "month", title="вся команда", refresh=False),
+            reply_markup=team_stats_period_keyboard("month"),
         )
 
     await answer_with_loading(
@@ -141,9 +164,9 @@ async def admin_team_stats_button(message: Message, services: ServiceContainer) 
 
 @router.message(StateFilter(None), F.text.in_({"Действия для барберов", "📣 Действия для барберов"}))
 async def admin_broadcast_button(message: Message, state: FSMContext, services: ServiceContainer) -> None:
-    await services.admin.ensure_admin(message.from_user.id)
+    await services.admin.ensure_manager(message.from_user.id)
     await state.clear()
-    branches = await services.admin.list_branches()
+    branches = await services.admin.list_visible_branches(message.from_user.id)
     if not branches:
         await message.answer(
             "\n\n".join(
@@ -156,7 +179,7 @@ async def admin_broadcast_button(message: Message, state: FSMContext, services: 
         )
         return
     if len(branches) == 1:
-        await _show_broadcast_actions(message, state, services, branches[0].id, edit=False)
+        await _show_broadcast_actions(message, state, services, branches[0].id, actor_id=message.from_user.id, edit=False)
         return
     await state.set_state(AdminBroadcastStates.choosing_branch)
     await message.answer(
@@ -216,15 +239,15 @@ async def admin_check_connection_button(message: Message, services: ServiceConta
 
 @router.callback_query(F.data == "admin:branches")
 async def admin_branches(callback: CallbackQuery, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
-    branches = await services.admin.list_branches()
+    await _ensure_manager(callback, services)
+    branches = await services.admin.list_visible_branches(callback.from_user.id)
     await _safe_edit_text(callback.message, _branches_text(branches), reply_markup=branches_keyboard(branches))
     await callback.answer()
 
 
 @router.callback_query(F.data == "admin:available_branches")
 async def admin_available_branches(callback: CallbackQuery, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     await callback.answer()
 
     async def load_available_branches():
@@ -254,7 +277,7 @@ async def admin_available_branches(callback: CallbackQuery, services: ServiceCon
 
 @router.callback_query(F.data == "admin:add_branch")
 async def admin_add_branch(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     await state.set_state(AdminBranchStates.waiting_branch_id)
     await callback.message.answer("Введите ID филиала YCLIENTS.")
     await callback.answer()
@@ -269,7 +292,7 @@ async def admin_add_branch_id(message: Message, state: FSMContext, services: Ser
         return
 
     async def add_branch():
-        branch = await services.admin.add_branch(branch_id)
+        branch = await services.admin.add_branch(branch_id, created_by_telegram_id=message.from_user.id)
         await state.clear()
         return (
             f"{bold('ФИЛИАЛ ДОБАВЛЕН')}\n\n{await services.admin.branch_details_text(branch)}",
@@ -286,7 +309,7 @@ async def admin_add_branch_id(message: Message, state: FSMContext, services: Ser
 
 @router.callback_query(F.data.startswith("available_branch:"))
 async def available_branch_callback(callback: CallbackQuery, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     _, action, yclients_branch_id = callback.data.split(":")
     if action == "exists":
         await callback.answer("Этот филиал уже добавлен.")
@@ -294,7 +317,7 @@ async def available_branch_callback(callback: CallbackQuery, services: ServiceCo
     await callback.answer()
 
     async def add_branch():
-        branch = await services.admin.add_branch(int(yclients_branch_id))
+        branch = await services.admin.add_branch(int(yclients_branch_id), created_by_telegram_id=callback.from_user.id)
         return (
             f"{bold('ФИЛИАЛ ДОБАВЛЕН')}\n\n{await services.admin.branch_details_text(branch)}",
             branch_dashboard_keyboard(branch.id),
@@ -549,6 +572,185 @@ async def admin_kpi(callback: CallbackQuery, state: FSMContext, services: Servic
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin:grade")
+async def admin_grade(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
+    await _ensure_admin(callback, services)
+    await state.clear()
+    await _safe_edit_text(
+        callback.message,
+        await services.admin.grade_settings_text(),
+        reply_markup=admin_grade_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:franchisees")
+async def admin_franchisees(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
+    await _ensure_admin(callback, services)
+    await state.clear()
+    franchisees = await services.admin.list_franchisees()
+    await _safe_edit_text(
+        callback.message,
+        _franchisees_text(franchisees),
+        reply_markup=franchisees_keyboard(franchisees),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "franchise:invite")
+async def admin_franchise_invite(callback: CallbackQuery, services: ServiceContainer) -> None:
+    await _ensure_admin(callback, services)
+    code = await services.admin.generate_franchise_invite(callback.from_user.id)
+    bot_info = await callback.bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={code}"
+    franchisees = await services.admin.list_franchisees()
+    await callback.message.answer(
+        "\n\n".join(
+            [
+                bold("ССЫЛКА ДЛЯ РУКОВОДИТЕЛЯ ФИЛИАЛА"),
+                pre(["Срок       7 дней", f"Код        {code}"]),
+                f"Ссылка: {html_escape(link)}",
+                blockquote(
+                    [
+                        "После перехода по ссылке человек подключится как руководитель филиала.",
+                        "Доступ к вашим филиалам по умолчанию выключен. Его можно включить в карточке руководителя.",
+                    ]
+                ),
+            ]
+        ),
+        reply_markup=franchisees_keyboard(franchisees),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("frt:"))
+async def admin_franchise_global_toggle(callback: CallbackQuery, services: ServiceContainer) -> None:
+    await _ensure_admin(callback, services)
+    parts = callback.data.split(":")
+    field_name = _FRANCHISE_GLOBAL_FIELDS.get(parts[1])
+    if field_name is None:
+        await callback.answer("Неизвестная настройка.", show_alert=True)
+        return
+    franchisee = await services.admin.toggle_franchisee_global_permission(UUID(parts[2]), field_name)
+    branches = await services.admin.list_branches()
+    await _safe_edit_text(callback.message, _franchisee_text(franchisee), reply_markup=franchisee_keyboard(franchisee, branches))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("frb:"))
+async def admin_franchise_branch_toggle(callback: CallbackQuery, services: ServiceContainer) -> None:
+    await _ensure_admin(callback, services)
+    parts = callback.data.split(":")
+    field_name = _FRANCHISE_BRANCH_FIELDS.get(parts[1])
+    if field_name is None:
+        await callback.answer("Неизвестная настройка.", show_alert=True)
+        return
+    branches = await services.admin.list_branches()
+    try:
+        branch = branches[int(parts[3])]
+    except (IndexError, ValueError):
+        await callback.answer("Филиал не найден. Откройте карточку заново.", show_alert=True)
+        return
+    franchisee = await services.admin.toggle_franchisee_branch_access(UUID(parts[2]), branch.id, field_name)
+    await _safe_edit_text(callback.message, _franchisee_text(franchisee), reply_markup=franchisee_keyboard(franchisee, branches))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("franchise:"))
+async def admin_franchise_callback(callback: CallbackQuery, services: ServiceContainer) -> None:
+    await _ensure_admin(callback, services)
+    parts = callback.data.split(":")
+    action = parts[1]
+    if action == "noop":
+        await callback.answer()
+        return
+    if action == "toggle":
+        field_name = parts[2]
+        franchisee_id = UUID(parts[3])
+        franchisee = await services.admin.toggle_franchisee_global_permission(franchisee_id, field_name)
+        branches = await services.admin.list_branches()
+        await _safe_edit_text(callback.message, _franchisee_text(franchisee), reply_markup=franchisee_keyboard(franchisee, branches))
+    elif action == "branch":
+        field_name = parts[2]
+        franchisee_id = UUID(parts[3])
+        branch_id = UUID(parts[4])
+        franchisee = await services.admin.toggle_franchisee_branch_access(franchisee_id, branch_id, field_name)
+        branches = await services.admin.list_branches()
+        await _safe_edit_text(callback.message, _franchisee_text(franchisee), reply_markup=franchisee_keyboard(franchisee, branches))
+    elif action == "block":
+        franchisee = await services.admin.block_franchisee(UUID(parts[2]), blocked=True)
+        branches = await services.admin.list_branches()
+        await _safe_edit_text(callback.message, _franchisee_text(franchisee), reply_markup=franchisee_keyboard(franchisee, branches))
+    elif action == "unblock":
+        franchisee = await services.admin.block_franchisee(UUID(parts[2]), blocked=False)
+        branches = await services.admin.list_branches()
+        await _safe_edit_text(callback.message, _franchisee_text(franchisee), reply_markup=franchisee_keyboard(franchisee, branches))
+    elif action == "delete":
+        franchisee = await services.admin.get_franchisee(UUID(parts[2]))
+        await _safe_edit_text(
+            callback.message,
+            "\n\n".join(
+                [
+                    bold("УДАЛИТЬ РУКОВОДИТЕЛЯ ФИЛИАЛА"),
+                    pre([f"Имя {franchisee.title}", f"Статус {'заблокирован' if franchisee.is_blocked else 'активен'}"]),
+                    blockquote("Доступ к боту будет отключён. Его филиалы в боте не удаляются."),
+                ]
+            ),
+            reply_markup=franchise_delete_confirm_keyboard(franchisee.id),
+        )
+    elif action == "delete_confirm":
+        deleted = await services.admin.delete_franchisee(UUID(parts[2]))
+        franchisees = await services.admin.list_franchisees()
+        await _safe_edit_text(
+            callback.message,
+            "\n\n".join([bold("РУКОВОДИТЕЛЬ ФИЛИАЛА УДАЛЁН"), blockquote(deleted.title)]),
+            reply_markup=franchisees_keyboard(franchisees),
+        )
+    else:
+        franchisee = await services.admin.get_franchisee(UUID(action))
+        branches = await services.admin.list_branches()
+        await _safe_edit_text(callback.message, _franchisee_text(franchisee), reply_markup=franchisee_keyboard(franchisee, branches))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:grade_edit")
+async def admin_grade_edit(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
+    await _ensure_admin(callback, services)
+    await state.set_state(AdminGradeStates.waiting_rules)
+    await _safe_edit_text(
+        callback.message,
+        "\n\n".join(
+            [
+                bold("ИЗМЕНЕНИЕ GRADE UP"),
+                blockquote(
+                    [
+                        "Отправьте правила строками.",
+                        "Формат: название = цена стрижки, средняя выручка/день, месяцев периода, минимальный стаж.",
+                        "Пример:",
+                        "Мастер = 1500, 12500, 2, 6",
+                        "Старший мастер = 1700, 14500, 2, 6",
+                        "Эксперт = 1900, 18000, 3, 12",
+                    ]
+                ),
+            ]
+        ),
+        reply_markup=admin_grade_edit_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:grade_cancel")
+async def admin_grade_cancel(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
+    await _ensure_admin(callback, services)
+    await state.clear()
+    await _safe_edit_text(
+        callback.message,
+        await services.admin.grade_settings_text(),
+        reply_markup=admin_grade_keyboard(),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "admin:kpi_edit")
 async def admin_kpi_edit(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
     await _ensure_admin(callback, services)
@@ -597,6 +799,20 @@ async def admin_kpi_rules_text(message: Message, state: FSMContext, services: Se
     await message.answer(
         "\n\n".join([bold("KPI СОХРАНЁН"), await services.admin.kpi_settings_text()]),
         reply_markup=admin_kpi_keyboard(),
+    )
+
+
+@router.message(AdminGradeStates.waiting_rules, F.text)
+async def admin_grade_rules_text(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    try:
+        await services.admin.update_grade_rules_from_text(message.text or "")
+    except AppError as exc:
+        await message.answer(exc.public_message, reply_markup=admin_grade_edit_keyboard())
+        return
+    await state.clear()
+    await message.answer(
+        "\n\n".join([bold("GRADE UP СОХРАНЁН"), await services.admin.grade_settings_text()]),
+        reply_markup=admin_grade_keyboard(),
     )
 
 
@@ -740,9 +956,9 @@ async def setup_yclients_user_token(
 
 @router.callback_query(F.data == "admin:broadcast")
 async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     await state.clear()
-    branches = await services.admin.list_branches()
+    branches = await services.admin.list_visible_branches(callback.from_user.id)
     if not branches:
         await _safe_edit_text(
             callback.message,
@@ -757,7 +973,7 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext, serv
         await callback.answer()
         return
     if len(branches) == 1:
-        await _show_broadcast_actions(callback.message, state, services, branches[0].id)
+        await _show_broadcast_actions(callback.message, state, services, branches[0].id, actor_id=callback.from_user.id)
     else:
         await state.set_state(AdminBroadcastStates.choosing_branch)
         await _safe_edit_text(
@@ -775,7 +991,7 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext, serv
 
 @router.callback_query(F.data == "broadcast:cancel")
 async def admin_broadcast_cancel(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     await state.clear()
     await _safe_edit_text(
         callback.message,
@@ -787,10 +1003,10 @@ async def admin_broadcast_cancel(callback: CallbackQuery, state: FSMContext, ser
 
 @router.callback_query(F.data.startswith("broadcast:branch:"))
 async def admin_broadcast_branch(callback: CallbackQuery, state: FSMContext, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     branch_value = callback.data.split(":", maxsplit=2)[2]
     branch_id = None if branch_value == "all" else UUID(branch_value)
-    await _show_broadcast_actions(callback.message, state, services, branch_id)
+    await _show_broadcast_actions(callback.message, state, services, branch_id, actor_id=callback.from_user.id)
     await callback.answer()
 
 
@@ -800,9 +1016,9 @@ async def admin_broadcast_message_action(
     state: FSMContext,
     services: ServiceContainer,
 ) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     await state.set_state(AdminBroadcastStates.waiting_message_text)
-    scope, targets_count = await _broadcast_scope_summary(state, services)
+    scope, targets_count = await _broadcast_scope_summary(state, services, callback.from_user.id)
     await _safe_edit_text(
         callback.message,
         "\n\n".join(
@@ -838,7 +1054,7 @@ async def admin_broadcast_message_text(message: Message, state: FSMContext, serv
         return
     await state.update_data(message_text=message_html)
     await state.set_state(AdminBroadcastStates.confirming_message)
-    scope, targets_count = await _broadcast_scope_summary(state, services)
+    scope, targets_count = await _broadcast_scope_summary(state, services, message.from_user.id)
     await message.answer(
         "\n\n".join(
             [
@@ -857,9 +1073,9 @@ async def admin_broadcast_statistics_action(
     state: FSMContext,
     services: ServiceContainer,
 ) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     await state.set_state(AdminBroadcastStates.confirming_statistics)
-    scope, targets_count = await _broadcast_scope_summary(state, services)
+    scope, targets_count = await _broadcast_scope_summary(state, services, callback.from_user.id)
     await _safe_edit_text(
         callback.message,
         "\n\n".join(
@@ -880,7 +1096,7 @@ async def admin_broadcast_confirm_message(
     state: FSMContext,
     services: ServiceContainer,
 ) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     data = await state.get_data()
     message_text = data.get("message_text")
     if not message_text:
@@ -889,7 +1105,7 @@ async def admin_broadcast_confirm_message(
     await callback.answer()
 
     async def send_message_broadcast():
-        targets = await _broadcast_targets_from_state(state, services)
+        targets = await _broadcast_targets_from_state(state, services, callback.from_user.id)
         sent, failed = await _send_text_to_targets(callback, targets, _admin_broadcast_text(message_text))
         await state.clear()
         return _broadcast_result_text("СООБЩЕНИЕ ОТПРАВЛЕНО", len(targets), sent, failed), None
@@ -908,20 +1124,23 @@ async def admin_broadcast_confirm_statistics(
     state: FSMContext,
     services: ServiceContainer,
 ) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     await callback.answer()
 
     async def send_statistics_broadcast():
-        targets = await _broadcast_targets_from_state(state, services)
+        targets = await _broadcast_targets_from_state(state, services, callback.from_user.id)
         with suppress(Exception):
             await services.statistics.refresh_team_period(targets, "month")
         sent = 0
         failed = 0
         for employee in targets:
             try:
-                await callback.bot.send_message(
-                    employee.telegram_user.telegram_id,
-                    await services.statistics.employee_stats_text(employee, "month", refresh=False),
+                fallback_text = await services.statistics.employee_stats_text(employee, "month", refresh=False)
+                rich_message = await services.statistics.employee_stats_rich_message(employee, "month")
+                await callback.bot.send_message(employee.telegram_user.telegram_id, fallback_text)
+                await callback.bot.send_rich_message(
+                    chat_id=employee.telegram_user.telegram_id,
+                    rich_message=rich_message,
                 )
                 sent += 1
             except Exception:
@@ -939,7 +1158,7 @@ async def admin_broadcast_confirm_statistics(
 
 @router.callback_query(F.data.startswith("branch:"))
 async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     parts = callback.data.split(":")
     action = parts[1]
     if action == "employees":
@@ -947,9 +1166,14 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
         await callback.answer()
 
         async def load_branch_employees():
-            branch = await services.admin.check_branch_connection(branch_id)
+            branch = await services.admin.get_visible_branch(branch_id, callback.from_user.id)
+            branch = await services.admin.check_branch_connection(branch.id)
             employees = await services.admin.get_branch_employees(branch.id)
-            return _employees_text(employees), employees_keyboard(branch.id, employees)
+            return RichMessageResult(
+                rich_message=_employees_rich_message(employees),
+                fallback_text=_employees_text(employees),
+                reply_markup=employees_keyboard(branch.id, employees),
+            )
 
         await edit_with_loading(
             callback.message,
@@ -963,7 +1187,8 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
         await callback.answer()
 
         async def check_branch():
-            branch = await services.admin.check_branch_connection(branch_id)
+            branch = await services.admin.get_visible_branch(branch_id, callback.from_user.id)
+            branch = await services.admin.check_branch_connection(branch.id)
             return await services.admin.branch_details_text(branch), branch_dashboard_keyboard(branch.id)
 
         await edit_with_loading(
@@ -975,14 +1200,19 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
         return
     elif action == "stats":
         period, branch_id = _branch_period_and_id(parts, default_period="month")
-        branch = await services.admin.get_branch(branch_id)
+        branch = await services.admin.get_visible_branch(branch_id, callback.from_user.id)
         await callback.answer()
 
         async def load_branch_stats():
             employees = await services.admin.get_branch_employees(branch.id)
-            return (
-                await services.statistics.team_stats_text(employees, period, title=branch.name),
-                branch_stats_period_keyboard(branch.id, period),
+            try:
+                await services.statistics.refresh_team_period(employees, period)
+            except Exception:
+                pass
+            return RichMessageResult(
+                rich_message=await services.statistics.team_stats_rich_message(employees, period, title=branch.name),
+                fallback_text=await services.statistics.team_stats_text(employees, period, title=branch.name, refresh=False),
+                reply_markup=branch_stats_period_keyboard(branch.id, period),
             )
 
         await edit_with_loading(
@@ -994,12 +1224,20 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
         return
     elif action == "kpi":
         branch_id = UUID(parts[2])
-        branch = await services.admin.get_branch(branch_id)
+        branch = await services.admin.get_visible_branch(branch_id, callback.from_user.id)
         await callback.answer()
 
         async def load_branch_kpi():
             employees = await services.admin.get_branch_employees(branch.id)
-            return await services.kpi.team_kpi_text(employees, title=branch.name), branch_dashboard_keyboard(branch.id)
+            try:
+                await services.statistics.refresh_team_period(employees, "month")
+            except Exception:
+                pass
+            return RichMessageResult(
+                rich_message=await services.kpi.team_kpi_rich_message(employees, title=branch.name),
+                fallback_text=await services.kpi.team_kpi_text(employees, title=branch.name, refresh=False),
+                reply_markup=branch_dashboard_keyboard(branch.id),
+            )
 
         await edit_with_loading(
             callback.message,
@@ -1010,7 +1248,7 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
         return
     elif action == "delete":
         branch_id = UUID(parts[2])
-        branch = await services.admin.get_branch(branch_id)
+        branch = await services.admin.ensure_can_delete_branch(branch_id, callback.from_user.id)
         await _safe_edit_text(
             callback.message,
             "\n\n".join(
@@ -1029,8 +1267,9 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
         )
     elif action == "delete_confirm":
         branch_id = UUID(parts[2])
+        await services.admin.ensure_can_delete_branch(branch_id, callback.from_user.id)
         deleted_branch = await services.admin.delete_branch(branch_id)
-        branches = await services.admin.list_branches()
+        branches = await services.admin.list_visible_branches(callback.from_user.id)
         await _safe_edit_text(
             callback.message,
             "\n\n".join(
@@ -1043,7 +1282,7 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
         )
     else:
         branch_id = UUID(action)
-        branch = await services.admin.get_branch(branch_id)
+        branch = await services.admin.get_visible_branch(branch_id, callback.from_user.id)
         await _safe_edit_text(
             callback.message,
             await services.admin.branch_details_text(branch),
@@ -1054,15 +1293,20 @@ async def branch_callback(callback: CallbackQuery, services: ServiceContainer) -
 
 @router.callback_query(F.data.startswith("admin:team_stats:"))
 async def admin_team_stats(callback: CallbackQuery, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     period = callback.data.split(":", maxsplit=2)[2]
     await callback.answer()
 
     async def load_team_stats():
-        employees = await services.admin.get_team_employees()
-        return (
-            await services.statistics.team_stats_text(employees, period, title="вся команда"),
-            team_stats_period_keyboard(period),
+        employees = await services.admin.get_visible_team_employees(callback.from_user.id)
+        try:
+            await services.statistics.refresh_team_period(employees, period)
+        except Exception:
+            pass
+        return RichMessageResult(
+            rich_message=await services.statistics.team_stats_rich_message(employees, period, title="вся команда"),
+            fallback_text=await services.statistics.team_stats_text(employees, period, title="вся команда", refresh=False),
+            reply_markup=team_stats_period_keyboard(period),
         )
 
     await edit_with_loading(
@@ -1075,11 +1319,11 @@ async def admin_team_stats(callback: CallbackQuery, services: ServiceContainer) 
 
 @router.callback_query(F.data.startswith("employee:"))
 async def employee_admin_callback(callback: CallbackQuery, services: ServiceContainer) -> None:
-    await _ensure_admin(callback, services)
+    await _ensure_manager(callback, services)
     parts = callback.data.split(":")
     action = parts[1]
     employee_id = UUID(parts[2] if len(parts) > 2 else parts[1])
-    employee = await services.admin.get_employee(employee_id)
+    employee = await services.admin.get_visible_employee(employee_id, callback.from_user.id)
 
     if action == "code":
         code = await services.connection.generate_code(employee.id)
@@ -1100,11 +1344,22 @@ async def employee_admin_callback(callback: CallbackQuery, services: ServiceCont
         await _safe_edit_text(callback.message, _employee_text(employee), reply_markup=employee_admin_keyboard(employee))
     elif action == "stats":
         await callback.answer()
+
+        async def load_employee_stats() -> RichMessageResult:
+            try:
+                await services.statistics.refresh_period(employee, "month")
+            except Exception:
+                pass
+            return RichMessageResult(
+                rich_message=await services.statistics.employee_stats_rich_message(employee, "month"),
+                fallback_text=await services.statistics.employee_stats_text(employee, "month", refresh=False),
+            )
+
         await answer_with_loading(
             callback.message,
             title="ЗАГРУЗКА СТАТИСТИКИ",
             detail="Обновляю месяц сотрудника.",
-            producer=lambda: services.statistics.employee_stats_text(employee, "month"),
+            producer=load_employee_stats,
         )
         return
     else:
@@ -1162,6 +1417,10 @@ async def admin_misc(callback: CallbackQuery, services: ServiceContainer) -> Non
 
 async def _ensure_admin(callback: CallbackQuery, services: ServiceContainer) -> None:
     await services.admin.ensure_admin(callback.from_user.id)
+
+
+async def _ensure_manager(callback: CallbackQuery, services: ServiceContainer) -> None:
+    await services.admin.ensure_manager(callback.from_user.id)
 
 
 async def _try_delete(message: Message) -> None:
@@ -1230,6 +1489,74 @@ def _employees_text(employees) -> str:
     )
 
 
+def _employees_rich_message(employees):
+    if not employees:
+        return rich_message("СОТРУДНИКИ", table(table_rows(["Статус"], [["Сотрудники пока не синхронизированы."]])))
+    rows = [
+        [
+            "✅" if employee.telegram_user_id else "❌",
+            employee.full_name,
+            employee.category_title or "без грейда",
+            _telegram_label(employee),
+        ]
+        for employee in employees
+    ]
+    return rich_message(
+        "СОТРУДНИКИ",
+        table(table_rows(["", "Имя", "Грейд", "Telegram"], rows)),
+    )
+
+
+def _franchisees_text(franchisees) -> str:
+    if not franchisees:
+        return "\n\n".join(
+            [
+                bold("РУКОВОДИТЕЛИ ФИЛИАЛОВ"),
+                blockquote("Пока никто не подключён. Создайте ссылку и отправьте её будущему руководителю филиала."),
+            ]
+        )
+    active = sum(1 for franchisee in franchisees if not franchisee.is_blocked)
+    return "\n\n".join(
+        [
+            bold("РУКОВОДИТЕЛИ ФИЛИАЛОВ"),
+            pre([f"Активные     {active}", f"Заблокированы {len(franchisees) - active}", f"Всего        {len(franchisees)}"]),
+        ]
+    )
+
+
+def _franchisee_text(franchisee) -> str:
+    telegram = "-"
+    if franchisee.telegram_user and franchisee.telegram_user.username:
+        telegram = f"@{franchisee.telegram_user.username}"
+    elif franchisee.telegram_user:
+        telegram = "Telegram"
+    branch_lines = []
+    for access in franchisee.branch_accesses:
+        if not access.branch:
+            continue
+        branch_lines.append(
+            f"{shorten(access.branch.name, 20):20} "
+            f"{'✅' if access.can_view_statistics else '❌'} стат "
+            f"{'✅' if access.can_message_employees else '❌'} сообщ "
+            f"{'✅' if access.can_manage_employees else '❌'} упр"
+        )
+    return "\n\n".join(
+        [
+            bold(franchisee.title.upper()),
+            pre(
+                [
+                    f"Telegram    {telegram}",
+                    f"Статус      {'❌ заблокирован' if franchisee.is_blocked else '✅ активен'}",
+                    f"Филиалы     {'✅ все филиалы руководителя' if franchisee.can_view_owner_branches else '❌ только выданные/свои'}",
+                    f"Сообщения   {'✅ разрешены' if franchisee.can_message_owner_employees else '❌ запрещены'}",
+                    f"Статистика  {'✅ разрешена' if franchisee.can_receive_owner_statistics else '❌ запрещена'}",
+                ]
+            ),
+            pre(["Доступы по филиалам", *(branch_lines or ["пока не выданы"])]),
+        ]
+    )
+
+
 def _employee_text(employee) -> str:
     status = "✅ подключён" if employee.telegram_user_id else "❌ не подключён"
     return "\n\n".join(
@@ -1261,11 +1588,12 @@ async def _show_broadcast_actions(
     services: ServiceContainer,
     branch_id: UUID | None,
     *,
+    actor_id: int,
     edit: bool = True,
 ) -> None:
     await state.update_data(broadcast_branch_id=str(branch_id) if branch_id else None)
     await state.set_state(AdminBroadcastStates.choosing_action)
-    scope, targets_count = await _broadcast_scope_summary(state, services)
+    scope, targets_count = await _broadcast_scope_summary(state, services, actor_id)
     text = "\n\n".join(
         [
             bold("ДЕЙСТВИЯ ДЛЯ БАРБЕРОВ"),
@@ -1279,18 +1607,18 @@ async def _show_broadcast_actions(
         await message.answer(text, reply_markup=broadcast_action_keyboard())
 
 
-async def _broadcast_scope_summary(state: FSMContext, services: ServiceContainer) -> tuple[str, int]:
+async def _broadcast_scope_summary(state: FSMContext, services: ServiceContainer, actor_id: int) -> tuple[str, int]:
     branch_id = await _broadcast_branch_id_from_state(state)
-    targets = await services.admin.get_broadcast_targets(branch_id)
+    targets = await services.admin.get_visible_broadcast_targets(actor_id, branch_id)
     if branch_id is None:
         return "все филиалы", len(targets)
     branch = await services.admin.get_branch(branch_id)
     return branch.name, len(targets)
 
 
-async def _broadcast_targets_from_state(state: FSMContext, services: ServiceContainer):
+async def _broadcast_targets_from_state(state: FSMContext, services: ServiceContainer, actor_id: int):
     branch_id = await _broadcast_branch_id_from_state(state)
-    return await services.admin.get_broadcast_targets(branch_id)
+    return await services.admin.get_visible_broadcast_targets(actor_id, branch_id)
 
 
 async def _broadcast_branch_id_from_state(state: FSMContext) -> UUID | None:

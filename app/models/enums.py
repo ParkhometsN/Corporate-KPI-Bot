@@ -3,6 +3,7 @@ from enum import StrEnum
 
 class Role(StrEnum):
     ADMIN = "admin"
+    FRANCHISEE = "franchisee"
     EMPLOYEE = "employee"
 
 
@@ -22,4 +23,3 @@ class ProductStockStatus(StrEnum):
     AVAILABLE = "available"
     LOW_STOCK = "low_stock"
     OUT_OF_STOCK = "out_of_stock"
-

@@ -20,6 +20,15 @@ class BranchRepository(BaseRepository[Branch]):
         )
         return list(result.scalars().all())
 
+    async def list_owned_by_user(self, company_id: UUID, owner_telegram_user_id: UUID) -> list[Branch]:
+        result = await self.session.execute(
+            select(Branch)
+            .where(Branch.company_id == company_id, Branch.owner_telegram_user_id == owner_telegram_user_id)
+            .options(selectinload(Branch.employees))
+            .order_by(Branch.name.asc())
+        )
+        return list(result.scalars().all())
+
     async def get_by_yclients_id(self, company_id: UUID, yclients_branch_id: int) -> Branch | None:
         result = await self.session.execute(
             select(Branch).where(
@@ -33,6 +42,7 @@ class BranchRepository(BaseRepository[Branch]):
         self,
         *,
         company_id: UUID,
+        owner_telegram_user_id: UUID | None = None,
         yclients_branch_id: int,
         name: str,
         address: str | None,
@@ -43,6 +53,7 @@ class BranchRepository(BaseRepository[Branch]):
         if branch is None:
             branch = Branch(
                 company_id=company_id,
+                owner_telegram_user_id=owner_telegram_user_id,
                 yclients_branch_id=yclients_branch_id,
                 name=name,
                 address=address,
@@ -53,6 +64,8 @@ class BranchRepository(BaseRepository[Branch]):
         else:
             branch.name = name
             branch.address = address
+            if owner_telegram_user_id is not None and branch.owner_telegram_user_id is None:
+                branch.owner_telegram_user_id = owner_telegram_user_id
             branch.sync_status = sync_status
             branch.last_synced_at = last_synced_at
             branch.last_sync_error = None

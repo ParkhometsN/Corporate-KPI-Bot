@@ -9,6 +9,7 @@ from app.models import Employee, EmployeeKpi
 from app.repositories import CompanyRepository, EmployeeKpiRepository, KpiRuleRepository, MonthlyStatisticRepository
 from app.services.statistics import StatisticsService, money
 from app.utils.exceptions import AppError
+from app.utils.rich_messages import key_value_rows, paragraph, rich_message, table, table_rows
 from app.utils.telegram_formatting import blockquote, bold, pre, progress_bar
 from app.utils.datetime import utc_now_naive
 
@@ -111,6 +112,65 @@ class KpiService:
         ]
         return "\n\n".join(parts)
 
+    async def employee_kpi_rich_message(
+        self,
+        employee: Employee,
+        month: date | None = None,
+    ) -> object:
+        month = (month or date.today()).replace(day=1)
+        entity = await self.calculate_employee_month(employee, month)
+        if entity is None:
+            return rich_message("KPI", paragraph("Компания не настроена, поэтому правила KPI недоступны."))
+        monthly_stat = await self._monthly_stats.get_for_employee(employee.id, month)
+        goal_amount = await self._next_kpi_goal(entity.kpi_base_amount)
+        goal_percent = await self._kpi_goal_percent(goal_amount)
+        goal_progress = (
+            min(Decimal("100"), entity.kpi_base_amount / goal_amount * Decimal("100"))
+            if goal_amount and goal_amount > 0
+            else Decimal("0")
+        )
+        amount_left = (
+            max(Decimal("0"), goal_amount - entity.kpi_base_amount)
+            if goal_amount is not None
+            else None
+        )
+        return rich_message(
+            "KPI",
+            table(
+                key_value_rows(
+                    [
+                        ("Период", f"{entity.month:%m.%Y}"),
+                        ("Даты", _month_period_values(entity.month)["dates"]),
+                        ("Сотрудник", employee.full_name),
+                        ("Филиал", employee.branch.name if employee.branch else "не указан"),
+                        ("Грейд", employee.category_title or "не указан"),
+                    ]
+                )
+            ),
+            table(
+                key_value_rows(
+                    [
+                        ("Основные услуги", money(entity.service_revenue)),
+                        ("Доп. услуги", money(entity.additional_services_revenue)),
+                        ("Товары", f"{monthly_stat.products_sold if monthly_stat else 0} / {money(monthly_stat.products_revenue if monthly_stat else Decimal('0'))}"),
+                        ("KPI база", money(entity.kpi_base_amount)),
+                        ("Бонус", f"+{entity.earned_percent.quantize(Decimal('0.01'))}%"),
+                        ("Применится", f"{entity.applies_from_month:%m.%Y}"),
+                    ]
+                )
+            ),
+            table(
+                key_value_rows(
+                    [
+                        ("Цель", _kpi_goal_line(goal_amount, goal_percent)),
+                        ("До цели", money(amount_left) if amount_left is not None else "не задано"),
+                        ("Прогресс", f"{progress_bar(goal_progress)} {goal_progress:.0f}%"),
+                    ]
+                )
+            ),
+            paragraph("KPI база считается как дополнительные услуги + товары. Процент переносится на следующий месяц."),
+        )
+
     async def team_kpi_text(
         self,
         employees: list[Employee],
@@ -170,6 +230,58 @@ class KpiService:
         ]
         return "\n\n".join(parts)
 
+    async def team_kpi_rich_message(
+        self,
+        employees: list[Employee],
+        *,
+        title: str,
+        month: date | None = None,
+    ) -> object:
+        month = (month or date.today()).replace(day=1)
+        if not employees:
+            return rich_message("KPI КОМАНДЫ", paragraph("Сотрудники пока не синхронизированы."))
+
+        rows = []
+        total_base = Decimal("0")
+        for employee in employees:
+            entity = await self.calculate_employee_month(employee, month)
+            if entity is None:
+                continue
+            total_base += entity.kpi_base_amount
+            rows.append((employee, entity))
+        employee_rows = [
+            [
+                employee.branch.name if employee.branch else "не указан",
+                employee.full_name,
+                money(entity.kpi_base_amount),
+                f"+{entity.earned_percent.quantize(Decimal('0.01'))}%",
+                f"{entity.applies_from_month:%m.%Y}",
+            ]
+            for employee, entity in sorted(rows, key=lambda item: item[1].kpi_base_amount, reverse=True)
+        ]
+        return rich_message(
+            "KPI КОМАНДЫ",
+            table(
+                key_value_rows(
+                    [
+                        ("Группа", title),
+                        ("Период", f"{month:%m.%Y}"),
+                        ("Даты", _month_period_values(month)["dates"]),
+                        ("Сотрудников", len(employees)),
+                        ("База KPI", money(total_base)),
+                    ]
+                )
+            ),
+            table(
+                table_rows(
+                    ["Филиал", "Сотрудник", "KPI база", "Бонус", "С"],
+                    employee_rows,
+                    numeric_columns={2, 3},
+                )
+            ),
+            paragraph("KPI база считается как дополнительные услуги + товары. Процент переносится на следующий месяц."),
+        )
+
     async def _next_kpi_goal(self, kpi_base: Decimal) -> Decimal | None:
         company = await self._companies.get_default()
         if company is None:
@@ -202,13 +314,18 @@ def _next_month(month: date) -> date:
 
 
 def _month_period_lines(month: date) -> list[str]:
+    values = _month_period_values(month)
+    return [f"Даты        {values['dates']}"]
+
+
+def _month_period_values(month: date) -> dict[str, str]:
     start = month.replace(day=1)
     today = date.today()
     if start.year == today.year and start.month == today.month:
         end = today
     else:
         end = _next_month(start) - date.resolution
-    return [f"Даты        {_date_range_label(start, end)}"]
+    return {"dates": _date_range_label(start, end)}
 
 
 def _date_range_label(start: date, end: date) -> str:

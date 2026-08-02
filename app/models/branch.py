@@ -15,6 +15,11 @@ class Branch(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
 
     company_id: Mapped[UUID] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    owner_telegram_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("telegram_users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     yclients_branch_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     address: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -28,7 +33,8 @@ class Branch(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     last_sync_error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
     company = relationship("Company", back_populates="branches")
+    owner_telegram_user = relationship("TelegramUser", foreign_keys=[owner_telegram_user_id])
     employees = relationship("Employee", back_populates="branch", cascade="all, delete-orphan")
     services = relationship("Service", back_populates="branch", cascade="all, delete-orphan")
     products = relationship("Product", back_populates="branch", cascade="all, delete-orphan")
-
+    franchise_accesses = relationship("FranchiseBranchAccess", back_populates="branch", cascade="all, delete-orphan")

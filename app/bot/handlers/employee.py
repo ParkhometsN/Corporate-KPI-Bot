@@ -40,12 +40,23 @@ def _button_text_is(*values: str):
 @router.message(_button_text_is("Статистика", "📊 Статистика"))
 async def employee_statistics(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
+
+    async def load_stats() -> RichMessageResult:
+        try:
+            await services.statistics.refresh_period(employee, "month")
+        except Exception:
+            pass
+        return RichMessageResult(
+            rich_message=await services.statistics.employee_stats_rich_message(employee, "month"),
+            fallback_text=await services.statistics.employee_stats_text(employee, "month", refresh=False),
+            reply_markup=stats_period_keyboard(),
+        )
+
     await answer_with_loading(
         message,
         title="ЗАГРУЗКА СТАТИСТИКИ",
         detail="Запрашиваю YCLIENTS и собираю период.",
-        producer=lambda: services.statistics.employee_stats_text(employee, "month"),
-        reply_markup=stats_period_keyboard(),
+        producer=load_stats,
     )
 
 
@@ -57,34 +68,64 @@ async def employee_statistics_period(callback: CallbackQuery, services: ServiceC
         return
     period = callback.data.split(":", maxsplit=1)[1]
     await callback.answer()
+
+    async def load_stats() -> RichMessageResult:
+        try:
+            await services.statistics.refresh_period(employee, period)
+        except Exception:
+            pass
+        return RichMessageResult(
+            rich_message=await services.statistics.employee_stats_rich_message(employee, period),
+            fallback_text=await services.statistics.employee_stats_text(employee, period, refresh=False),
+            reply_markup=stats_period_keyboard(),
+        )
+
     await edit_with_loading(
         callback.message,
         title="ЗАГРУЗКА СТАТИСТИКИ",
         detail="Обновляю выбранный период.",
-        producer=lambda: services.statistics.employee_stats_text(employee, period),
-        reply_markup=stats_period_keyboard(),
+        producer=load_stats,
     )
 
 
 @router.message(_button_text_is("KPI", "🎯 KPI"))
 async def employee_kpi(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
+
+    async def load_kpi() -> RichMessageResult:
+        try:
+            await services.statistics.refresh_period(employee, "month")
+        except Exception:
+            pass
+        return RichMessageResult(
+            rich_message=await services.kpi.employee_kpi_rich_message(employee),
+            fallback_text=await services.kpi.employee_kpi_text(employee, refresh=False),
+        )
+
     await answer_with_loading(
         message,
         title="ЗАГРУЗКА KPI",
         detail="Обновляю месяц и пересчитываю процент.",
-        producer=lambda: services.kpi.employee_kpi_text(employee),
+        producer=load_kpi,
     )
 
 
 @router.message(_button_text_is("Grade Up", "📈 Grade Up"))
 async def employee_grade(message: Message, services: ServiceContainer) -> None:
     employee = await _require_employee(message, services)
+
+    async def load_grade() -> RichMessageResult:
+        fallback_text = await services.grade.grade_text(employee)
+        return RichMessageResult(
+            rich_message=await services.grade.grade_rich_message(employee),
+            fallback_text=fallback_text,
+        )
+
     await answer_with_loading(
         message,
         title="ЗАГРУЗКА GRADE UP",
         detail="Считаю прогресс до следующей категории.",
-        producer=lambda: services.grade.grade_text(employee),
+        producer=load_grade,
     )
 
 

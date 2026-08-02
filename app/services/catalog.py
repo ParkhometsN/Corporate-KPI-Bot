@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import Settings
 from app.models import Company, Employee
-from app.repositories import CompanyRepository, ServiceRepository
+from app.repositories import CompanyRepository, GradeRuleRepository, ServiceRepository
 from app.services.security import EncryptionService
 from app.utils.exceptions import AppError
 from app.utils.telegram_formatting import blockquote, bold, money, pre
@@ -23,6 +23,7 @@ from app.yclients.types import YClientsProduct
 
 CATALOG_LINE_WIDTH = 52
 PRODUCTS_BODY_LIMIT = 3200
+SERVICE_SECTION_ORDER = ("Основные услуги", "Доп. услуги", "Комплексы", "Остальное")
 PRODUCT_CATEGORY_PRIORITY = (
     "reuzel",
     "volcano",
@@ -41,6 +42,7 @@ class CatalogService:
     def __init__(self, session: AsyncSession, settings: Settings) -> None:
         self._settings = settings
         self._companies = CompanyRepository(session)
+        self._grade_rules = GradeRuleRepository(session)
         self._services = ServiceRepository(session)
         self._encryption = EncryptionService(settings)
 
@@ -54,17 +56,17 @@ class CatalogService:
                 ]
             )
 
-        grouped = _group_services(services)
-        show_categories = len(grouped) > 1 or "Без категории" not in grouped
-        body_lines = _service_catalog_lines(grouped, show_categories=show_categories)
+        grouped = await self._group_employee_services(employee, services)
+        body_lines = _service_catalog_lines(grouped, show_categories=True)
 
         parts: list[str] = [
             bold("УСЛУГИ"),
             pre(
                 [
-                    f"Позиций     {len(services)}",
-                    "Формат      названия сгруппированы",
-                    "Цены        варианты через точку",
+                    f"Сотрудник   {employee.full_name}",
+                    f"Грейд       {employee.category_title or 'не указан'}",
+                    f"Позиций     {sum(len(items) for items in grouped.values())}",
+                    "Прайс       цены подобраны под мастера",
                 ]
             ),
             pre(body_lines),
@@ -83,8 +85,7 @@ class CatalogService:
                 ]
             )
 
-        grouped = _group_services(services)
-        show_categories = len(grouped) > 1 or "Без категории" not in grouped
+        grouped = await self._group_employee_services(employee, services)
         table_rows: list[list[RichBlockTableCell]] = [
             [
                 _table_cell("Услуга", is_header=True),
@@ -92,8 +93,7 @@ class CatalogService:
             ]
         ]
         for category, titles in grouped.items():
-            if show_categories:
-                table_rows.append([_table_cell(category.upper(), is_header=True, colspan=2)])
+            table_rows.append([_table_cell(category.upper(), is_header=True, colspan=2)])
             for item in titles.values():
                 prices = sorted(item["prices"], key=lambda price: (price[0], price[1]))
                 price_line = "\n".join(_price_range(price_min, price_max) for price_min, price_max in prices)
@@ -107,11 +107,21 @@ class CatalogService:
             blocks=[
                 InputRichBlockSectionHeading(text="УСЛУГИ", size=2),
                 InputRichBlockParagraph(
-                    text=f"Позиций: {len(services)}. Одинаковые названия сгруппированы, цены показаны вариантами."
+                    text=(
+                        f"Сотрудник: {employee.full_name}. "
+                        f"Грейд: {employee.category_title or 'не указан'}. "
+                        "Показаны цены, подобранные под мастера."
+                    )
                 ),
                 InputRichBlockTable(cells=table_rows, is_bordered=True, is_striped=True),
             ]
         )
+
+    async def _group_employee_services(self, employee: Employee, services) -> OrderedDict[str, OrderedDict[str, dict[str, object]]]:
+        company = await self._companies.get_default()
+        rules = await self._grade_rules.list_active(company.id) if company is not None else []
+        grade_index, base_price = _employee_grade_position(employee, rules)
+        return _group_services(services, grade_index=grade_index, base_price=base_price)
 
     async def products_text(self, employee: Employee, query: str | None = None) -> str:
         return (await self.products_messages(employee, query=query))[0]
@@ -191,10 +201,15 @@ def _normalize_title(title: str) -> str:
     return _clean_title(title).casefold().replace("ё", "е")
 
 
-def _group_services(services) -> OrderedDict[str, OrderedDict[str, dict[str, object]]]:
+def _group_services(
+    services,
+    *,
+    grade_index: int | None = None,
+    base_price: Decimal | None = None,
+) -> OrderedDict[str, OrderedDict[str, dict[str, object]]]:
     grouped: OrderedDict[str, OrderedDict[str, dict[str, object]]] = OrderedDict()
     for service in services:
-        category = service.category or "Без категории"
+        category = _service_section(service.title, service.category)
         grouped.setdefault(category, OrderedDict())
         service_key = _normalize_title(service.title)
         item = grouped[category].setdefault(
@@ -202,7 +217,101 @@ def _group_services(services) -> OrderedDict[str, OrderedDict[str, dict[str, obj
             {"title": _clean_title(service.title), "prices": set()},
         )
         item["prices"].add((service.price_min, service.price_max))
-    return grouped
+    if grade_index is not None:
+        for titles in grouped.values():
+            for item in titles.values():
+                item["prices"] = set(_prices_for_grade(item["prices"], grade_index=grade_index, base_price=base_price))
+    return _sort_service_groups(grouped)
+
+
+def _sort_service_groups(
+    grouped: OrderedDict[str, OrderedDict[str, dict[str, object]]],
+) -> OrderedDict[str, OrderedDict[str, dict[str, object]]]:
+    ordered: OrderedDict[str, OrderedDict[str, dict[str, object]]] = OrderedDict()
+    categories = [category for category in SERVICE_SECTION_ORDER if category in grouped]
+    categories.extend(sorted((category for category in grouped if category not in SERVICE_SECTION_ORDER), key=str.casefold))
+    for category in categories:
+        ordered[category] = OrderedDict(
+            sorted(grouped[category].items(), key=lambda item: str(item[1]["title"]).casefold())
+        )
+    return ordered
+
+
+def _employee_grade_position(employee: Employee, rules) -> tuple[int | None, Decimal | None]:
+    category = (employee.category_title or "").casefold().replace("ё", "е")
+    for index, rule in enumerate(rules):
+        rule_category = rule.category_title.casefold().replace("ё", "е")
+        if rule_category in category or category in rule_category or str(int(rule.base_price)) in category:
+            return index, rule.base_price
+    for index, price in enumerate((Decimal("1500"), Decimal("1700"), Decimal("1900"), Decimal("2300"))):
+        if str(int(price)) in category:
+            return index, price
+    aliases = (
+        ("старший эксперт", Decimal("2300"), 3),
+        ("старший мастер", Decimal("1700"), 1),
+        ("эксперт", Decimal("1900"), 2),
+        ("мастер", Decimal("1500"), 0),
+    )
+    for alias, price, index in aliases:
+        if alias in category:
+            return index, price
+    return None, None
+
+
+def _prices_for_grade(
+    prices,
+    *,
+    grade_index: int,
+    base_price: Decimal | None,
+) -> list[tuple[Decimal, Decimal]]:
+    sorted_prices = sorted(prices, key=lambda price: (price[0], price[1]))
+    if not sorted_prices:
+        return []
+    if base_price is not None:
+        exact_prices = [
+            price
+            for price in sorted_prices
+            if price[0] <= base_price <= price[1] or price[0] == base_price or price[1] == base_price
+        ]
+        if exact_prices:
+            return exact_prices
+    if len(sorted_prices) <= 1:
+        return sorted_prices
+    return [sorted_prices[min(grade_index, len(sorted_prices) - 1)]]
+
+
+def _service_section(title: str, category: str | None) -> str:
+    normalized = _normalize_title(" ".join(part for part in (category, title) if part))
+    if "+" in title or "комплекс" in normalized or "папа" in normalized:
+        return "Комплексы"
+    additional_keywords = (
+        "воск",
+        "камуфляж",
+        "тонир",
+        "детокс",
+        "уход",
+        "патчи",
+        "уклад",
+        "окраш",
+        "завив",
+        "volcare",
+        "маска",
+        "шампун",
+        "скраб",
+    )
+    if any(keyword in normalized for keyword in additional_keywords):
+        return "Доп. услуги"
+    main_keywords = (
+        "стриж",
+        "брить",
+        "бритв",
+        "бород",
+        "коррекц",
+        "шейвер",
+    )
+    if any(keyword in normalized for keyword in main_keywords):
+        return "Основные услуги"
+    return "Остальное"
 
 
 def _table_cell(text: str, *, is_header: bool = False, colspan: int | None = None) -> RichBlockTableCell:

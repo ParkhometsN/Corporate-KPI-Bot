@@ -6,6 +6,7 @@ from app.models.company import Company
 from app.models.connection_code import ConnectionCode
 from app.models.employee import Employee
 from app.models.enums import ConnectionCodeStatus, ProductStockStatus, Role, SyncStatus
+from app.models.franchise import FranchiseBranchAccess, FranchiseInvite, Franchisee
 from app.models.kpi import EmployeeKpi, GradeRule, KpiRule
 from app.models.log_entry import LogEntry
 from app.models.notification import NotificationSettings
@@ -21,6 +22,9 @@ __all__ = [
     "DailyStatistic",
     "Employee",
     "EmployeeKpi",
+    "FranchiseBranchAccess",
+    "FranchiseInvite",
+    "Franchisee",
     "GradeRule",
     "KpiRule",
     "LogEntry",
