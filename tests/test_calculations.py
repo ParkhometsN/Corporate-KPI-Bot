@@ -4,9 +4,11 @@ from types import SimpleNamespace
 
 from app.bot.handlers.employee import _normalize_button_text
 from app.services.catalog import (
+    _employee_grade_position,
     _normalize_title,
     _product_catalog_chunks,
     _product_sort_key,
+    _prices_for_grade,
     _visible_products,
     _wrap_text,
     _wrap_tokens,
@@ -54,6 +56,36 @@ def test_grade_current_category_aliases_match_price_rules() -> None:
 
     assert current.base_price == Decimal("1500")
     assert next_rule.base_price == Decimal("1700")
+
+
+def test_catalog_grade_position_prefers_specific_grade_title() -> None:
+    rules = [
+        SimpleNamespace(category_title="Мастер", base_price=Decimal("1500")),
+        SimpleNamespace(category_title="Старший мастер", base_price=Decimal("1700")),
+        SimpleNamespace(category_title="Эксперт", base_price=Decimal("1900")),
+        SimpleNamespace(category_title="Старший эксперт", base_price=Decimal("2300")),
+    ]
+
+    assert _employee_grade_position(SimpleNamespace(category_title="Старший Мастер"), rules) == (
+        1,
+        Decimal("1700"),
+    )
+    assert _employee_grade_position(SimpleNamespace(category_title="Старший Эксперт"), rules) == (
+        3,
+        Decimal("2300"),
+    )
+
+
+def test_catalog_grade_price_does_not_fall_below_base_when_higher_variant_exists() -> None:
+    prices = {
+        (Decimal("900"), Decimal("900")),
+        (Decimal("1500"), Decimal("1500")),
+        (Decimal("1900"), Decimal("1900")),
+    }
+
+    assert _prices_for_grade(prices, grade_index=1, base_price=Decimal("1700")) == [
+        (Decimal("1900"), Decimal("1900"))
+    ]
 
 
 def test_grade_period_includes_current_month() -> None:

@@ -241,7 +241,7 @@ def employee_admin_keyboard(employee: Employee) -> InlineKeyboardMarkup:
         rows.extend(
             [
                 [InlineKeyboardButton(text="Смотреть статистику", callback_data=f"employee:stats:{employee_id}")],
-                [InlineKeyboardButton(text="Переподключить Telegram", callback_data=f"employee:code:{employee_id}")],
+                [InlineKeyboardButton(text="Добавить/обновить Telegram", callback_data=f"employee:code:{employee_id}")],
                 [InlineKeyboardButton(text="Отключить", callback_data=f"employee:disconnect:{employee_id}")],
             ]
         )

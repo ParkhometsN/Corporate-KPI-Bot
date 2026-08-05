@@ -53,7 +53,12 @@ async def start(message: Message, state: FSMContext, services: ServiceContainer)
         employee = await services.connection.bind_employee(message.from_user, payload)
         await _notify_admin_connection_success(message, services, payload, employee)
         await message.answer(
-            f"Готово, Telegram подключён к сотруднику {employee.full_name}.",
+            "\n".join(
+                [
+                    f"Готово, Telegram подключён к сотруднику {employee.full_name}.",
+                    f"Филиал: {employee.branch.name if employee.branch else 'не указан'}.",
+                ]
+            ),
             reply_markup=employee_main_keyboard(),
         )
         return
@@ -92,7 +97,12 @@ async def bind_employee(message: Message, state: FSMContext, services: ServiceCo
     await _notify_admin_connection_success(message, services, code, employee)
     await state.clear()
     await message.answer(
-        f"Готово, Telegram подключён к сотруднику {employee.full_name}.",
+        "\n".join(
+            [
+                f"Готово, Telegram подключён к сотруднику {employee.full_name}.",
+                f"Филиал: {employee.branch.name if employee.branch else 'не указан'}.",
+            ]
+        ),
         reply_markup=employee_main_keyboard(),
     )
 
@@ -161,6 +171,7 @@ async def _notify_admin_connection_success(
                     "СОТРУДНИК ПОДКЛЮЧЁН",
                     "",
                     f"Сотрудник: {employee.full_name}",
+                    f"Филиал: {employee.branch.name if employee.branch else 'не указан'}",
                     "Статус: Telegram успешно подключён.",
                 ]
             ),

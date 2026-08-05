@@ -1,4 +1,5 @@
 from collections import OrderedDict
+import asyncio
 from decimal import Decimal
 import re
 from time import monotonic
@@ -13,9 +14,10 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.settings import Settings
-from app.models import Branch, Company, Employee
-from app.repositories import CompanyRepository, FranchiseeRepository, GradeRuleRepository, ServiceRepository
+from app.models import Branch, Company, Employee, SyncStatus
+from app.repositories import CompanyRepository, EmployeeRepository, FranchiseeRepository, GradeRuleRepository, ServiceRepository
 from app.services.security import EncryptionService
+from app.utils.datetime import utc_now_naive
 from app.utils.exceptions import AppError
 from app.utils.telegram_formatting import blockquote, bold, money, pre
 from app.yclients.client import YClientsClient
@@ -37,18 +39,21 @@ PRODUCT_CATEGORY_PRIORITY = (
     "rebel",
 )
 _PRODUCTS_CACHE: dict[int, tuple[float, list[YClientsProduct]]] = {}
+_SERVICES_REFRESH_CACHE: dict[int, float] = {}
 
 
 class CatalogService:
     def __init__(self, session: AsyncSession, settings: Settings) -> None:
         self._settings = settings
         self._companies = CompanyRepository(session)
+        self._employees = EmployeeRepository(session)
         self._franchisees = FranchiseeRepository(session)
         self._grade_rules = GradeRuleRepository(session)
         self._services = ServiceRepository(session)
         self._encryption = EncryptionService(settings)
 
     async def services_text(self, employee: Employee) -> str:
+        await self._refresh_employee_catalog_if_stale(employee)
         services = await self._services.list_by_branch(employee.branch_id)
         if not services:
             return "\n\n".join(
@@ -76,6 +81,7 @@ class CatalogService:
         return "\n\n".join(parts)
 
     async def services_rich_message(self, employee: Employee) -> InputRichMessage:
+        await self._refresh_employee_catalog_if_stale(employee)
         services = await self._services.list_by_branch(employee.branch_id)
         if not services:
             return InputRichMessage(
@@ -124,6 +130,63 @@ class CatalogService:
         rules = await self._grade_rules.list_active(company.id) if company is not None else []
         grade_index, base_price = _employee_grade_position(employee, rules)
         return _group_services(services, grade_index=grade_index, base_price=base_price)
+
+    async def _refresh_employee_catalog_if_stale(self, employee: Employee) -> None:
+        if employee.branch is None:
+            return
+        branch = employee.branch
+        branch_key = branch.yclients_branch_id
+        cached_at = _SERVICES_REFRESH_CACHE.get(branch_key)
+        if cached_at is not None and monotonic() - cached_at < self._settings.yclients_catalog_cache_ttl_seconds:
+            return
+        _SERVICES_REFRESH_CACHE[branch_key] = monotonic()
+
+        company = await self._companies.get_default()
+        if company is None:
+            return
+        try:
+            client = await self._client_for_branch(company, branch)
+            employees_result, services_result = await asyncio.gather(
+                client.list_employees(branch.yclients_branch_id),
+                client.list_services(branch.yclients_branch_id),
+                return_exceptions=True,
+            )
+        except Exception:
+            return
+
+        synced_anything = False
+        if not isinstance(employees_result, Exception):
+            active_staff_ids = {item.id for item in employees_result}
+            for item in employees_result:
+                await self._employees.upsert(
+                    branch_id=branch.id,
+                    yclients_staff_id=item.id,
+                    full_name=item.name,
+                    specialization=item.specialization,
+                    category_title=item.category_title,
+                )
+            await self._employees.deactivate_missing_staff(branch.id, active_staff_ids)
+            branch.employees_count = len(employees_result)
+            synced_anything = True
+
+        if not isinstance(services_result, Exception):
+            active_service_ids = {item.id for item in services_result}
+            for item in services_result:
+                await self._services.upsert(
+                    branch_id=branch.id,
+                    yclients_service_id=item.id,
+                    title=item.title,
+                    category=item.category,
+                    price_min=item.price_min,
+                    price_max=item.price_max,
+                )
+            await self._services.deactivate_missing_services(branch.id, active_service_ids)
+            synced_anything = True
+
+        if synced_anything:
+            branch.sync_status = SyncStatus.SYNCED
+            branch.last_synced_at = utc_now_naive()
+            branch.last_sync_error = None
 
     async def products_text(self, employee: Employee, query: str | None = None) -> str:
         return (await self.products_messages(employee, query=query))[0]
@@ -287,11 +350,17 @@ def _sort_service_groups(
 
 
 def _employee_grade_position(employee: Employee, rules) -> tuple[int | None, Decimal | None]:
-    category = (employee.category_title or "").casefold().replace("ё", "е")
-    for index, rule in enumerate(rules):
-        rule_category = rule.category_title.casefold().replace("ё", "е")
-        if rule_category in category or category in rule_category or str(int(rule.base_price)) in category:
-            return index, rule.base_price
+    category = _normalize_grade_text(employee.category_title or "")
+    normalized_rules = [
+        (index, _normalize_grade_text(rule.category_title), rule.base_price)
+        for index, rule in enumerate(rules)
+    ]
+    for index, rule_category, base_price in normalized_rules:
+        if rule_category and category == rule_category:
+            return index, base_price
+    for index, _, base_price in normalized_rules:
+        if str(int(base_price)) in category:
+            return index, base_price
     for index, price in enumerate((Decimal("1500"), Decimal("1700"), Decimal("1900"), Decimal("2300"))):
         if str(int(price)) in category:
             return index, price
@@ -304,6 +373,9 @@ def _employee_grade_position(employee: Employee, rules) -> tuple[int | None, Dec
     for alias, price, index in aliases:
         if alias in category:
             return index, price
+    for index, rule_category, base_price in sorted(normalized_rules, key=lambda item: len(item[1]), reverse=True):
+        if rule_category and (rule_category in category or category in rule_category):
+            return index, base_price
     return None, None
 
 
@@ -326,7 +398,16 @@ def _prices_for_grade(
             return exact_prices
     if len(sorted_prices) <= 1:
         return sorted_prices
-    return [sorted_prices[min(grade_index, len(sorted_prices) - 1)]]
+    candidate = sorted_prices[min(grade_index, len(sorted_prices) - 1)]
+    if base_price is not None and candidate[1] < base_price:
+        higher_prices = [price for price in sorted_prices if price[1] >= base_price]
+        if higher_prices:
+            return [higher_prices[0]]
+    return [candidate]
+
+
+def _normalize_grade_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.casefold().replace("ё", "е")).strip()
 
 
 def _service_section(title: str, category: str | None) -> str:

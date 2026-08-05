@@ -1410,9 +1410,20 @@ async def employee_admin_callback(callback: CallbackQuery, services: ServiceCont
             "\n\n".join(
                 [
                     bold("КОД ПОДКЛЮЧЕНИЯ"),
-                    pre([f"Сотрудник {employee.full_name}", f"Код       {code}"]),
+                    pre(
+                        [
+                            f"Сотрудник {employee.full_name}",
+                            f"Филиал    {employee.branch.name if employee.branch else 'не указан'}",
+                            f"Код       {code}",
+                        ]
+                    ),
                     f"Ссылка: {html_escape(link)}",
-                    blockquote("Срок действия: 15 минут. Отправьте сотруднику код или ссылку."),
+                    blockquote(
+                        [
+                            "Срок действия: 15 минут.",
+                            "Если сотрудник уже подключён к другому филиалу, эта ссылка добавит ему ещё один филиал.",
+                        ]
+                    ),
                 ]
             )
         )
@@ -1661,6 +1672,7 @@ def _employee_text(employee) -> str:
                 [
                     f"Telegram   {_telegram_label(employee)}",
                     f"Статус     {status}",
+                    f"Филиал     {employee.branch.name if employee.branch else 'не указан'}",
                     f"Категория  {employee.category_title or 'не указана'}",
                     f"Staff ID   {employee.yclients_staff_id}",
                 ]
