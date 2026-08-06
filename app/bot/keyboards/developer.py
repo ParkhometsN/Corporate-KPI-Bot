@@ -10,9 +10,28 @@ def developer_main_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Панель руководителя", callback_data="dev:admin")],
             [InlineKeyboardButton(text="Войти как барбер", callback_data="dev:employees")],
+            [InlineKeyboardButton(text="Войти как франчайзи", callback_data="dev:franchisees")],
             [InlineKeyboardButton(text="Выйти из dev-режима", callback_data="dev:logout")],
         ]
     )
+
+
+def developer_franchisees_keyboard(franchisees: list) -> InlineKeyboardMarkup:
+    rows = []
+    for franchisee in franchisees[:80]:
+        telegram = ""
+        if franchisee.telegram_user and franchisee.telegram_user.username:
+            telegram = f" @{franchisee.telegram_user.username}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{shorten(franchisee.title, 30)}{telegram}",
+                    callback_data=f"dev:franchisee:{franchisee.id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="dev:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def developer_employees_keyboard(employees: list[Employee]) -> InlineKeyboardMarkup:

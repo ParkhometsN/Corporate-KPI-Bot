@@ -150,6 +150,9 @@ class StatisticsService:
         start, today = _period_bounds(period)
         return await self._daily_stats.list_period(employee.id, start, today)
 
+    async def has_employee_activity(self, employee: Employee, period: str) -> bool:
+        return any(_stat_has_activity(stat) for stat in await self.get_period_stats(employee, period))
+
     async def refresh_employees_period(
         self,
         employees: list[Employee],
@@ -903,6 +906,19 @@ def _average_decimal_attr(stats: list, field_name: str) -> Decimal:
     if not stats:
         return Decimal("0")
     return sum((getattr(item, field_name, Decimal("0")) for item in stats), Decimal("0")) / len(stats)
+
+
+def _stat_has_activity(stat) -> bool:
+    return any(
+        [
+            getattr(stat, "haircuts_count", 0) > 0,
+            getattr(stat, "service_revenue", Decimal("0")) > 0,
+            getattr(stat, "additional_services_revenue", Decimal("0")) > 0,
+            getattr(stat, "total_revenue", Decimal("0")) > 0,
+            getattr(stat, "products_sold", 0) > 0,
+            getattr(stat, "products_revenue", Decimal("0")) > 0,
+        ]
+    )
 
 
 def _percent(value: int, total: int) -> Decimal:

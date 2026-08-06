@@ -23,6 +23,7 @@ from app.repositories import (
     ServiceRepository,
     TelegramUserRepository,
 )
+import app.services.developer_mode as developer_mode
 from app.services.security import CodeHashService, EncryptionService, PasswordService
 from app.services.sync import SyncService
 from app.utils.datetime import utc_now_naive
@@ -100,11 +101,11 @@ class AdminService:
         return await self._telegram_users.has_active_admins()
 
     async def is_admin(self, telegram_id: int) -> bool:
-        user = await self._telegram_users.get_by_telegram_id(telegram_id)
+        user = await self._telegram_users.get_by_telegram_id(self._auth_telegram_id(telegram_id))
         return bool(user and user.role == Role.ADMIN and user.is_active)
 
     async def is_manager(self, telegram_id: int) -> bool:
-        user = await self._telegram_users.get_by_telegram_id(telegram_id)
+        user = await self._telegram_users.get_by_telegram_id(self._auth_telegram_id(telegram_id))
         if user is None or not user.is_active:
             return False
         if user.role == Role.ADMIN:
@@ -301,13 +302,13 @@ class AdminService:
         return employee
 
     async def ensure_admin(self, telegram_id: int) -> TelegramUser:
-        user = await self._telegram_users.get_by_telegram_id(telegram_id)
+        user = await self._telegram_users.get_by_telegram_id(self._auth_telegram_id(telegram_id))
         if user is None or user.role != Role.ADMIN or not user.is_active:
             raise AccessDeniedError("Сначала войдите через /admin.")
         return user
 
     async def ensure_manager(self, telegram_id: int) -> TelegramUser:
-        user = await self._telegram_users.get_by_telegram_id(telegram_id)
+        user = await self._telegram_users.get_by_telegram_id(self._auth_telegram_id(telegram_id))
         if user is None or not user.is_active or user.role not in {Role.ADMIN, Role.FRANCHISEE}:
             raise AccessDeniedError("Сначала войдите через /admin.")
         if user.role == Role.FRANCHISEE:
@@ -662,7 +663,11 @@ class AdminService:
                     blockquote("Проверьте API key и Partner ID в настройках."),
                 ]
             )
-        stored_branches = await self._branches.list_by_company(company.id)
+        stored_branches = (
+            await self.list_visible_branches(telegram_id)
+            if telegram_id is not None and actor is not None
+            else await self._branches.list_by_company(company.id)
+        )
         probe_branches = branches or [
             YClientsBranch(
                 id=branch.yclients_branch_id,
@@ -673,6 +678,8 @@ class AdminService:
         ]
         preview = [f"{branch.title} · {branch.id}" for branch in branches[:10]]
         stored_preview = [f"{branch.name} · {branch.yclients_branch_id}" for branch in stored_branches[:10]]
+        stored_employees_count = await self._active_employees_count(stored_branches)
+        stored_connected_count = await self._connected_employees_count(stored_branches)
         capability_lines = await self._capability_lines(client, probe_branches)
         parts = [
             bold("ПРОВЕРКА YCLIENTS"),
@@ -682,6 +689,8 @@ class AdminService:
                     f"Partner ID {company.partner_id}",
                     f"Филиалов через партнёра {len(branches)}",
                     f"Филиалов в боте         {len(stored_branches)}",
+                    f"Сотрудников в боте      {stored_employees_count}",
+                    f"Telegram подключено     {stored_connected_count}",
                 ]
             ),
         ]
@@ -735,17 +744,19 @@ class AdminService:
 
     async def dashboard_text(self, telegram_id: int | None = None) -> str:
         company = await self._require_company()
+        effective_telegram_id = self._auth_telegram_id(telegram_id) if telegram_id is not None else None
         branches = await (
             self.list_visible_branches(telegram_id)
             if telegram_id is not None and await self.is_manager(telegram_id)
             else self._branches.list_by_company(company.id)
         )
-        employees_count = sum(branch.employees_count for branch in branches)
+        employees_count = await self._active_employees_count(branches)
+        connected_count = await self._connected_employees_count(branches)
         yclients_status = "✅ настроен" if self._company_has_yclients_credentials(company) else "❌ не настроен"
         user_token_status = self._company_user_token_status(company)
         role_line = None
-        if telegram_id is not None:
-            user = await self._telegram_users.get_by_telegram_id(telegram_id)
+        if effective_telegram_id is not None:
+            user = await self._telegram_users.get_by_telegram_id(effective_telegram_id)
             if user and user.role == Role.FRANCHISEE:
                 role_line = "Роль           руководитель филиала"
                 franchisee = await self._franchisees.get_by_telegram_user_id(user.id)
@@ -764,6 +775,7 @@ class AdminService:
                         f"User token     {user_token_status}",
                         f"Филиалов       {len(branches)}",
                         f"Сотрудников    {employees_count}",
+                        f"Подключены     {connected_count}",
                         f"Проверка       каждые {company.synchronization_interval_minutes} мин.",
                     ]
                 ),
@@ -775,6 +787,24 @@ class AdminService:
         if company is None:
             raise EntityNotFoundError("Компания ещё не настроена.")
         return company
+
+    def _auth_telegram_id(self, telegram_id: int | None) -> int | None:
+        if telegram_id is None:
+            return None
+        return developer_mode.effective_telegram_id(telegram_id)
+
+    async def _active_employees_count(self, branches: list[Branch]) -> int:
+        total = 0
+        for branch in branches:
+            total += len(await self._employees.list_by_branch(branch.id))
+        return total
+
+    async def _connected_employees_count(self, branches: list[Branch]) -> int:
+        total = 0
+        for branch in branches:
+            employees = await self._employees.list_by_branch(branch.id)
+            total += sum(1 for employee in employees if employee.telegram_user_id)
+        return total
 
     async def _require_franchisee(self, user: TelegramUser) -> Franchisee:
         franchisee = await self._franchisees.get_by_telegram_user_id(user.id)

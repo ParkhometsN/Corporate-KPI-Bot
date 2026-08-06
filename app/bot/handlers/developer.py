@@ -7,30 +7,29 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.bot.handlers.loading import RichMessageResult, RichMessagesResult, answer_with_loading, edit_with_loading
-from app.bot.keyboards.admin import admin_main_keyboard
+from app.bot.keyboards.admin import admin_main_keyboard, franchisee_main_keyboard
 from app.bot.keyboards.developer import (
     developer_employee_keyboard,
     developer_employee_stats_keyboard,
     developer_employees_keyboard,
+    developer_franchisees_keyboard,
     developer_main_keyboard,
 )
-from app.models import Role
+import app.services.developer_mode as developer_mode
 from app.services.factory import ServiceContainer
 from app.utils.telegram_formatting import blockquote, bold, pre
 
 router = Router(name="developer")
-_DEVELOPER_SESSION_IDS: set[int] = set()
-_DEVELOPER_PREVIOUS_ROLES: dict[int, Role | None] = {}
 
 
 @router.message(Command("adminparkhometsn"))
 async def developer_start(message: Message, state: FSMContext, services: ServiceContainer) -> None:
     await state.clear()
-    _DEVELOPER_PREVIOUS_ROLES.setdefault(
+    developer_mode.start_session(
         message.from_user.id,
         await services.admin.developer_previous_role(message.from_user.id),
     )
-    _DEVELOPER_SESSION_IDS.add(message.from_user.id)
+    developer_mode.set_impersonation(message.from_user.id, None)
     await services.admin.grant_developer_admin(message.from_user)
     await message.answer(
         "\n\n".join(
@@ -59,6 +58,7 @@ async def developer_home(callback: CallbackQuery, services: ServiceContainer) ->
     if not await _ensure_developer(callback, services):
         return
     await callback.answer()
+    developer_mode.set_impersonation(callback.from_user.id, None)
     if callback.data == "dev:admin":
         await callback.message.answer(
             await services.admin.dashboard_text(callback.from_user.id),
@@ -84,6 +84,7 @@ async def developer_logout(callback: CallbackQuery, services: ServiceContainer) 
 async def developer_employees(callback: CallbackQuery, services: ServiceContainer) -> None:
     if not await _ensure_developer(callback, services):
         return
+    developer_mode.set_impersonation(callback.from_user.id, None)
     employees = await services.admin.list_active_employees()
     await callback.answer()
     await callback.message.edit_text(
@@ -97,10 +98,60 @@ async def developer_employees(callback: CallbackQuery, services: ServiceContaine
     )
 
 
+@router.callback_query(F.data == "dev:franchisees")
+async def developer_franchisees(callback: CallbackQuery, services: ServiceContainer) -> None:
+    if not await _ensure_developer(callback, services):
+        return
+    developer_mode.set_impersonation(callback.from_user.id, None)
+    franchisees = await services.admin.list_franchisees()
+    await callback.answer()
+    await callback.message.edit_text(
+        "\n\n".join(
+            [
+                bold("DEV: ФРАНЧАЙЗИ"),
+                pre([f"Руководителей {len(franchisees)}", "Выберите профиль для просмотра."]),
+            ]
+        ),
+        reply_markup=developer_franchisees_keyboard(franchisees),
+    )
+
+
+@router.callback_query(F.data.startswith("dev:franchisee:"))
+async def developer_franchisee(callback: CallbackQuery, services: ServiceContainer) -> None:
+    if not await _ensure_developer(callback, services):
+        return
+    franchisee = await services.admin.get_franchisee(UUID(callback.data.split(":")[2]))
+    if franchisee.telegram_user is None:
+        await callback.answer("У франчайзи нет Telegram-профиля.", show_alert=True)
+        return
+    developer_mode.set_impersonation(callback.from_user.id, franchisee.telegram_user.telegram_id)
+    await callback.answer("Открыт режим франчайзи.")
+    await callback.message.answer(
+        "\n\n".join(
+            [
+                bold("DEV: РЕЖИМ ФРАНЧАЙЗИ"),
+                blockquote(
+                    [
+                        f"Профиль: {franchisee.title}",
+                        "Кнопки ниже работают так, как будто их нажимает этот руководитель филиала.",
+                        "Чтобы вернуться к основному руководителю, откройте /adminparkhometsn. Для полного выхода используйте /devexit.",
+                    ]
+                ),
+            ]
+        ),
+        reply_markup=franchisee_main_keyboard(),
+    )
+    await callback.message.answer(
+        await services.admin.dashboard_text(callback.from_user.id),
+        reply_markup=franchisee_main_keyboard(),
+    )
+
+
 @router.callback_query(F.data.startswith("dev:employee:"))
 async def developer_employee(callback: CallbackQuery, services: ServiceContainer) -> None:
     if not await _ensure_developer(callback, services):
         return
+    developer_mode.set_impersonation(callback.from_user.id, None)
     employee = await services.admin.get_employee(UUID(callback.data.split(":")[2]))
     await callback.answer()
     await callback.message.edit_text(
@@ -241,15 +292,14 @@ async def _show_developer_stats(
 
 
 async def _ensure_developer(callback: CallbackQuery, services: ServiceContainer) -> bool:
-    if callback.from_user.id in _DEVELOPER_SESSION_IDS or await services.admin.is_admin(callback.from_user.id):
+    if developer_mode.is_developer_session(callback.from_user.id) or await services.admin.is_admin(callback.from_user.id):
         return True
     await callback.answer("Сначала откройте /adminparkhometsn.", show_alert=True)
     return False
 
 
 async def _developer_logout(telegram_id: int, services: ServiceContainer) -> None:
-    _DEVELOPER_SESSION_IDS.discard(telegram_id)
-    previous_role = _DEVELOPER_PREVIOUS_ROLES.pop(telegram_id, None)
+    previous_role = developer_mode.end_session(telegram_id)
     await services.admin.restore_developer_role(telegram_id, previous_role)
 
 

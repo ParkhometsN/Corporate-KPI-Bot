@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config.logging import get_logger
 from app.config.settings import Settings
-from app.models import Employee
+from app.models import Employee, TelegramUser
 from app.repositories import ScheduleRepository
 from app.services import build_services
 
@@ -115,6 +115,8 @@ async def send_monthly_reports(
         employees = await _connected_employees(session)
         previous_month = _previous_month(date.today())
         for employee in employees:
+            if not _notifications_enabled(employee, "previous_month"):
+                continue
             await _send_rich_or_text(
                 bot,
                 employee.telegram_user.telegram_id,
@@ -148,6 +150,19 @@ async def _send_period_reports(
         services = build_services(session, settings)
         employees = await _connected_employees(session)
         for employee in employees:
+            if not _notifications_enabled(employee, period):
+                continue
+            if period == "today":
+                try:
+                    await services.statistics.refresh_period(employee, period)
+                except Exception as exc:
+                    logger.warning(
+                        "daily_report_refresh_failed",
+                        employee_id=str(employee.id),
+                        error=str(exc)[:200],
+                    )
+                if not await services.statistics.has_employee_activity(employee, period):
+                    continue
             await _send_rich_or_text(
                 bot,
                 employee.telegram_user.telegram_id,
@@ -169,9 +184,26 @@ async def _connected_employees(session: AsyncSession) -> list[Employee]:
     result = await session.execute(
         select(Employee)
         .where(Employee.telegram_user_id.is_not(None), Employee.is_active.is_(True))
-        .options(selectinload(Employee.telegram_user), selectinload(Employee.branch))
+        .options(
+            selectinload(Employee.telegram_user).selectinload(TelegramUser.notifications),
+            selectinload(Employee.branch),
+        )
     )
     return list(result.scalars().all())
+
+
+def _notifications_enabled(employee: Employee, period: str) -> bool:
+    telegram_user = employee.telegram_user
+    settings = telegram_user.notifications if telegram_user else None
+    if settings is None:
+        return True
+    if period == "today":
+        return settings.daily_enabled
+    if period == "week":
+        return settings.weekly_enabled
+    if period == "previous_month":
+        return settings.monthly_enabled
+    return True
 
 
 def _previous_month(day: date) -> date:

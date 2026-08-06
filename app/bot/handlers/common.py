@@ -81,6 +81,14 @@ async def bind_franchisee_code(message: Message, state: FSMContext, services: Se
     await _bind_franchisee_by_code(message, state, services, (message.text or "").strip())
 
 
+@router.message(F.text.regexp(r"^[A-Za-z0-9]{8}$"))
+async def bind_employee_code_message(message: Message, state: FSMContext, services: ServiceContainer) -> None:
+    if await services.admin.is_manager(message.from_user.id):
+        await message.answer("Этот код предназначен для сотрудника. Отправьте его с Telegram-аккаунта мастера.")
+        return
+    await _bind_employee_by_code(message, state, services, (message.text or "").strip())
+
+
 @router.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -93,6 +101,15 @@ async def bind_employee(message: Message, state: FSMContext, services: ServiceCo
     if code.startswith("fr_"):
         await _bind_franchisee_by_code(message, state, services, code)
         return
+    await _bind_employee_by_code(message, state, services, code)
+
+
+async def _bind_employee_by_code(
+    message: Message,
+    state: FSMContext,
+    services: ServiceContainer,
+    code: str,
+) -> None:
     employee = await services.connection.bind_employee(message.from_user, code)
     await _notify_admin_connection_success(message, services, code, employee)
     await state.clear()

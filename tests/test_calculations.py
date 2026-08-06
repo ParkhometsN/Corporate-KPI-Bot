@@ -15,7 +15,7 @@ from app.services.catalog import (
 )
 from app.services.grade import _find_current_and_next, _grade_period_bounds, progress_bar
 from app.services.kpi import _earned_percent_from_rules, _kpi_bonus_base, _next_month
-from app.services.statistics import _period_bounds
+from app.services.statistics import _period_bounds, _stat_has_activity
 from app.yclients.client import (
     _calculate_daily_statistic,
     _extract_user_token,
@@ -111,6 +111,29 @@ def test_kpi_bonus_base_uses_additional_services_and_products() -> None:
 
     assert kpi_base == Decimal("37000")
     assert _earned_percent_from_rules(rules, kpi_base) == Decimal("2")
+
+
+def test_daily_report_activity_ignores_empty_days() -> None:
+    assert not _stat_has_activity(
+        SimpleNamespace(
+            haircuts_count=0,
+            service_revenue=Decimal("0"),
+            additional_services_revenue=Decimal("0"),
+            total_revenue=Decimal("0"),
+            products_sold=0,
+            products_revenue=Decimal("0"),
+        )
+    )
+    assert _stat_has_activity(
+        SimpleNamespace(
+            haircuts_count=0,
+            service_revenue=Decimal("0"),
+            additional_services_revenue=Decimal("400"),
+            total_revenue=Decimal("400"),
+            products_sold=0,
+            products_revenue=Decimal("0"),
+        )
+    )
 
 
 def test_service_title_normalization_groups_minor_variants() -> None:
